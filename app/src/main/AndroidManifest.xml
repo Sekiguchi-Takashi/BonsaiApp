@@ -3,7 +3,6 @@
 
     <application
         android:label="Bonsai"
-        android:extractNativeLibs="true"
         android:allowBackup="false">
 
         <activity

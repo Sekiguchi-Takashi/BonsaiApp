@@ -72,9 +72,10 @@ Java_com_appathy_bonsai_LlamaBridge_nativeLoad(
     }
 
     llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    // Bonsai 公式推奨: temp 0.5 / top-p 0.9 / top-k 20
     llama_sampler_chain_add(smpl, llama_sampler_init_top_k(20));
-    llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.95f, 1));
-    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.7f));
+    llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.90f, 1));
+    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.5f));
     llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
     auto * s = new Session{model, ctx, smpl};
@@ -105,6 +106,7 @@ Java_com_appathy_bonsai_LlamaBridge_nativeGenerate(
     jmethodID onTok = env->GetMethodID(cbClass, "onToken", "(Ljava/lang/String;)V");
 
     llama_batch batch = llama_batch_get_one(tokens.data(), (int32_t) tokens.size());
+    llama_token cur = 0;   // batch が指す先の生存を保証する
 
     for (int i = 0; i < maxTokens; i++) {
         if (llama_decode(s->ctx, batch) != 0) {
@@ -122,9 +124,8 @@ Java_com_appathy_bonsai_LlamaBridge_nativeGenerate(
         env->CallVoidMethod(callback, onTok, jPiece);
         env->DeleteLocalRef(jPiece);
 
-        static llama_token next;   // batch が指す先を生存させる
-        next  = id;
-        batch = llama_batch_get_one(&next, 1);
+        cur   = id;
+        batch = llama_batch_get_one(&cur, 1);
     }
 }
 
