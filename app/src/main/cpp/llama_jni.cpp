@@ -1,5 +1,9 @@
 // llama_jni.cpp v0.3
 //
+// v0.5 の変更:
+//   - 簡体字トークンを logit bias で禁止（言語ドリフト対策）
+//   - システムプロンプトを Kotlin 側から指定
+//
 // v0.4 の変更:
 //   - UTF-8 マルチバイト境界のバッファリング（日本語で落ちる致命バグの修正）
 //   - トークンを jbyteArray で受け渡し（NewStringUTF の Modified UTF-8 制約を回避）
@@ -18,6 +22,9 @@
 #include <jni.h>
 #include <android/log.h>
 #include <atomic>
+#include <cmath>
+#include <set>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -33,6 +40,7 @@ struct Session {
     llama_model   * model = nullptr;
     llama_context * ctx   = nullptr;
     llama_sampler * smpl  = nullptr;
+    std::vector<llama_logit_bias> biases;   // sampler より長生きさせる
     std::atomic<bool> stop{false};
 };
 
@@ -79,6 +87,55 @@ void emit(JNIEnv * env, jobject cb, jmethodID mid, const std::string & text) {
     }
 }
 
+
+// ---- 簡体字の抑制 ----------------------------------------------------
+//
+// 1bit 量子化モデルは言語ドリフトを起こしやすく、日本語プロンプトでも
+// 中国語が混入する。プロンプト側の指示だけでは抑えきれないため、
+// 「日本語では使わない簡体字」を含むトークンを logit bias で禁止する。
+//
+// 注意: 学・国・会・体・数 など日本の新字体と同形の字は含めていない。
+// これらを禁止すると日本語自体が壊れる。
+
+static const char * kSimplifiedOnly =
+    u8"东个丽举么义乌乐乔习乡书买乱亏亚产仅从仑仓仪们价众优伟传伤伦你佣侠侣侧侨俩俭俯倦债倾储兰关兴农冲决况净凉减几卖哪处备复够头夹夺奋妆宁实宽宾对寻导尔尘尝层属岁币帅师带帮庆库应张弹归当录彻径忆怀态总恋恳惊惧惯战户扑执扩扫扬担拟挂挥换据摄摆敌无时显晒术机权极构枪标树桥检楼欢欧汇汉灭灯炉烦烧热爱爷牵犹独狮猪玛环现琼电疗皱监盖盘睁码础确离种积称稳穷窃窜竖笔笼筑简类粮紧纠纤约级纪纬纯纱纲纳纵纷纸纹纺纽线练组绅细织终绊绍绎经绑绒结绕绘给绚络绝绞统绢绣继续维绵综缓编缘缝缩缴见警计订认讨让训议讯记讲讳讶许论讼设访诀证评识诈诉诊词译试诗诚话诞诠询该详诬语误说诵请诸诺读课谁调谅谈谊谋谎谓谜谢谣谦谨谬谱贝财责贤败货质贩贪贫购贮贯贵贷贸费贺贼贾资赋赌赎赏赐赔赚赛赞赠赢赶起趋车轧轨轩转轮软轰轻载较辅辆辈辉辐输辖辙边达过运还这进远连适选那针钉钓钙钟钢钥钦钩钱钻铁铃铅铜铝银铺链销锁锅锋锐错锦键镇镜长门闪闭问闯闲间闷闻阀阁阅阐阔阳阴阶际陆陇陈陕页题风飞饥饭饮饰饱饲饼馅馆馈馒马驰驱驳驻驾骂骄骆验骑骗骤骨鸟龙，";
+
+// UTF-8 文字列をコードポイント集合へ
+std::set<uint32_t> decode_utf8_set(const char * s) {
+    std::set<uint32_t> out;
+    const unsigned char * p = (const unsigned char *) s;
+    while (*p) {
+        uint32_t cp; int len;
+        if      ((*p & 0x80) == 0x00) { cp = *p;         len = 1; }
+        else if ((*p & 0xE0) == 0xC0) { cp = *p & 0x1F;  len = 2; }
+        else if ((*p & 0xF0) == 0xE0) { cp = *p & 0x0F;  len = 3; }
+        else if ((*p & 0xF8) == 0xF0) { cp = *p & 0x07;  len = 4; }
+        else { p++; continue; }
+        for (int i = 1; i < len; i++) cp = (cp << 6) | (p[i] & 0x3F);
+        out.insert(cp);
+        p += len;
+    }
+    return out;
+}
+
+bool contains_any_cp(const std::string & s, const std::set<uint32_t> & banned) {
+    const unsigned char * p = (const unsigned char *) s.c_str();
+    const unsigned char * end = p + s.size();
+    while (p < end) {
+        uint32_t cp; int len;
+        if      ((*p & 0x80) == 0x00) { cp = *p;         len = 1; }
+        else if ((*p & 0xE0) == 0xC0) { cp = *p & 0x1F;  len = 2; }
+        else if ((*p & 0xF0) == 0xE0) { cp = *p & 0x0F;  len = 3; }
+        else if ((*p & 0xF8) == 0xF0) { cp = *p & 0x07;  len = 4; }
+        else { p++; continue; }
+        if (p + len > end) break;
+        for (int i = 1; i < len; i++) cp = (cp << 6) | (p[i] & 0x3F);
+        if (banned.count(cp)) return true;
+        p += len;
+    }
+    return false;
+}
+
 // GGUF 埋め込みのチャットテンプレートを適用する。
 // 取得できなければ ChatML でフォールバック。
 std::string apply_chat_template(const llama_model * model,
@@ -121,7 +178,8 @@ extern "C" {
 
 JNIEXPORT jlong JNICALL
 Java_com_appathy_bonsai_LlamaBridge_nativeLoad(
-        JNIEnv * env, jobject, jstring jPath, jint nCtx, jint nThreads) {
+        JNIEnv * env, jobject, jstring jPath, jint nCtx, jint nThreads,
+        jboolean banSimplified) {
 
     static bool backend_ready = false;
     if (!backend_ready) {
@@ -163,16 +221,37 @@ Java_com_appathy_bonsai_LlamaBridge_nativeLoad(
         return 0;
     }
 
-    llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    // Bonsai 公式推奨: temp 0.5 / top-p 0.9 / top-k 20
-    llama_sampler_chain_add(smpl, llama_sampler_init_top_k(20));
-    llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.90f, 1));
-    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.5f));
-    llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
-
     auto * s = new Session();
     s->model = model;
     s->ctx   = ctx;
+
+    llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
+
+    // 簡体字トークンの禁止。語彙全走査は数十msで済む。
+    if (banSimplified) {
+        const llama_vocab * vocab = llama_model_get_vocab(model);
+        const std::set<uint32_t> banned = decode_utf8_set(kSimplifiedOnly);
+        const int n_vocab = llama_vocab_n_tokens(vocab);
+        for (int t = 0; t < n_vocab; t++) {
+            if (contains_any_cp(piece_of(vocab, t), banned)) {
+                s->biases.push_back({ (llama_token) t, -INFINITY });
+            }
+        }
+        LOGI("banned %zu / %d tokens (simplified chinese)", s->biases.size(), n_vocab);
+        if (!s->biases.empty()) {
+            llama_sampler_chain_add(smpl,
+                llama_sampler_init_logit_bias(n_vocab,
+                                              (int32_t) s->biases.size(),
+                                              s->biases.data()));
+        }
+    }
+
+    // Bonsai 公式推奨は temp 0.5 だが、言語ドリフト抑制のため 0.35 に下げている
+    llama_sampler_chain_add(smpl, llama_sampler_init_top_k(20));
+    llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.90f, 1));
+    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.35f));
+    llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+
     s->smpl  = smpl;
 
     LOGI("loaded, n_ctx=%d threads=%d kv=q8_0 mmap=on", nCtx, nThreads);

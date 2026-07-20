@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- アダプティブアイコンのセーフゾーン(中央72dp)に収める -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.68"
+        android:scaleY="0.68">
+
+        <!-- 幹（S字） -->
+        <path
+            android:fillColor="#966E4A"
+            android:pathData="M48,80 L58,80 L56,68 L50,60 L52,50 L58,42 L53,40 L46,48 L44,58 L48,68 Z" />
+
+        <!-- 枝 -->
+        <path
+            android:strokeColor="#966E4A"
+            android:strokeWidth="3"
+            android:strokeLineCap="round"
+            android:pathData="M48,58 L30,50" />
+        <path
+            android:strokeColor="#966E4A"
+            android:strokeWidth="2.6"
+            android:strokeLineCap="round"
+            android:pathData="M50,52 L76,46" />
+
+        <!-- 葉冠（影） -->
+        <path
+            android:fillColor="#3A8456"
+            android:pathData="M28,31 a27,11 0 1,0 54,0 a27,11 0 1,0 -54,0 Z" />
+        <path
+            android:fillColor="#3A8456"
+            android:pathData="M16,48 a15,8 0 1,0 30,0 a15,8 0 1,0 -30,0 Z" />
+        <path
+            android:fillColor="#3A8456"
+            android:pathData="M62,44 a15,8 0 1,0 30,0 a15,8 0 1,0 -30,0 Z" />
+
+        <!-- 葉冠（本体） -->
+        <path
+            android:fillColor="#63BA80"
+            android:pathData="M30,28.5 a25,10.5 0 1,0 50,0 a25,10.5 0 1,0 -50,0 Z" />
+        <path
+            android:fillColor="#63BA80"
+            android:pathData="M18,45.5 a13,7.5 0 1,0 26,0 a13,7.5 0 1,0 -26,0 Z" />
+        <path
+            android:fillColor="#63BA80"
+            android:pathData="M64,41.5 a13,7.5 0 1,0 26,0 a13,7.5 0 1,0 -26,0 Z" />
+
+        <!-- 土 -->
+        <path
+            android:fillColor="#48362C"
+            android:pathData="M34,76 a20,4 0 1,0 40,0 a20,4 0 1,0 -40,0 Z" />
+
+        <!-- 鉢 -->
+        <path
+            android:fillColor="#924732"
+            android:pathData="M36,76 L72,76 L66,90 L42,90 Z" />
+        <path
+            android:fillColor="#BA6246"
+            android:pathData="M33.5,70 L74.5,70 A2.5,2.5 0 0,1 77,72.5 L77,76.5 A2.5,2.5 0 0,1 74.5,79 L33.5,79 A2.5,2.5 0 0,1 31,76.5 L31,72.5 A2.5,2.5 0 0,1 33.5,70 Z" />
+    </group>
+</vector>

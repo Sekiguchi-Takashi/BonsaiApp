@@ -3,6 +3,8 @@
 
     <application
         android:label="Bonsai"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:largeHeap="true"
         android:allowBackup="false">
 

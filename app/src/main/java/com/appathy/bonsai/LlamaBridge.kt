@@ -25,9 +25,18 @@ class LlamaBridge {
 
     val isLoaded: Boolean get() = handle != 0L
 
-    fun load(modelPath: String, nCtx: Int = 1024, nThreads: Int = 4): Boolean {
+    /**
+     * @param banSimplified 簡体字を含むトークンを logit bias で禁止する。
+     *        語彙全走査のぶん読込が数十ms伸びるが、言語ドリフトにはこれが一番効く。
+     */
+    fun load(
+        modelPath: String,
+        nCtx: Int = 1024,
+        nThreads: Int = 4,
+        banSimplified: Boolean = true
+    ): Boolean {
         if (handle != 0L) free()
-        handle = nativeLoad(modelPath, nCtx, nThreads)
+        handle = nativeLoad(modelPath, nCtx, nThreads, banSimplified)
         return handle != 0L
     }
 
@@ -52,7 +61,9 @@ class LlamaBridge {
         }
     }
 
-    private external fun nativeLoad(path: String, nCtx: Int, nThreads: Int): Long
+    private external fun nativeLoad(
+        path: String, nCtx: Int, nThreads: Int, banSimplified: Boolean
+    ): Long
     private external fun nativeGenerate(
         h: Long, system: String, prompt: String, maxTokens: Int, sink: Any
     )

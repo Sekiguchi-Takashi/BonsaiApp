@@ -31,7 +31,10 @@ class MainActivity : Activity() {
         private const val REQ_PICK = 1001
         private const val N_CTX = 1024
         private const val MAX_TOKENS = 512
-        private const val SYSTEM_PROMPT = "You are a helpful assistant"
+        private const val SYSTEM_PROMPT =
+            "あなたは日本語で応答するアシスタントです。" +
+            "回答は必ず日本語だけで書いてください。" +
+            "中国語・簡体字・英語は使わないでください。"
         private const val UI_INTERVAL_MS = 60L
     }
 
@@ -202,12 +205,21 @@ class MainActivity : Activity() {
 
     // ---------- 生成 ----------
 
-    /** Qwen3 系が出す <think>…</think> を表示から除去する */
+    /**
+     * 表示用の整形。
+     *  - Qwen3 系が出す <think>…</think> を除去
+     *  - Markdown 記法（**強調** / ### 見出し / --- 罫線）を平文に落とす
+     */
     private fun strip(raw: String): String {
-        val closed = Regex("(?s)<think>.*?</think>").replace(raw, "")
-        // 閉じタグがまだ来ていない途中経過も隠す
-        val idx = closed.indexOf("<think>")
-        val s = if (idx >= 0) closed.substring(0, idx) else closed
+        var s = Regex("(?s)<think>.*?</think>").replace(raw, "")
+        val idx = s.indexOf("<think>")
+        if (idx >= 0) s = s.substring(0, idx)          // 閉じタグ未到達の途中経過
+
+        s = Regex("\\*\\*(.+?)\\*\\*").replace(s, "\$1")   // **強調**
+        s = Regex("(?m)^#{1,6}\\s*").replace(s, "")             // ### 見出し
+        s = Regex("(?m)^\\s*[-*_]{3,}\\s*$").replace(s, "")   // --- 罫線
+        s = Regex("\\n{3,}").replace(s, "\n\n")               // 余分な空行
+
         return s.trimStart()
     }
 
