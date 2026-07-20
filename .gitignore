@@ -1,0 +1,8 @@
+# llama.cpp は CI が clone するのでコミットしない
+app/src/main/cpp/llama.cpp/
+build/
+app/build/
+app/.cxx/
+.gradle/
+local.properties
+*.gguf

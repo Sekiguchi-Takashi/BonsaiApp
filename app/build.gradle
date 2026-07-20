@@ -1,0 +1,80 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.appathy.bonsai'
+    compileSdk 34
+    ndkVersion '26.3.11579264'
+
+    defaultConfig {
+        applicationId "com.appathy.bonsai"
+        // llama.cpp の Android ビルドは android-28 以上が前提
+        minSdk 28
+        targetSdk 34
+        versionCode 1
+        versionName "0.1"
+
+        ndk {
+            // arm64 のみ。x86_64 も足すとビルド時間がほぼ倍になる
+            abiFilters 'arm64-v8a'
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags '-std=c++17'
+                arguments '-DANDROID_STL=c++_static',
+                          '-DCMAKE_BUILD_TYPE=Release',
+                          // --- llama.cpp 公式 Android 推奨 ---
+                          '-DGGML_OPENMP=OFF',      // NDK の OpenMP は CMake から解決できない
+                          '-DGGML_LLAMAFILE=OFF',   // llamafile は Android 非対応
+                          '-DBUILD_SHARED_LIBS=OFF',
+                          // --- 不要なターゲットを全部落とす（ビルド時間対策）---
+                          '-DLLAMA_BUILD_TESTS=OFF',
+                          '-DLLAMA_BUILD_EXAMPLES=OFF',
+                          '-DLLAMA_BUILD_TOOLS=OFF',
+                          '-DLLAMA_BUILD_SERVER=OFF',
+                          '-DLLAMA_CURL=OFF'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    signingConfigs {
+        debug {
+            // 既存プロジェクトから debug.keystore をコピーして配置する
+            storeFile file('../debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+// 外部依存ゼロ方針は維持（androidx すら入れない）
+dependencies { }

@@ -1,0 +1,82 @@
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      llama_repo:
+        description: 'llama.cpp repository URL'
+        required: false
+        default: 'https://github.com/PrismML-Eng/llama.cpp'
+      llama_ref:
+        description: 'branch / tag / commit SHA to build against'
+        required: false
+        default: 'prism'
+
+env:
+  # ---- 固定バージョン（既存方針を踏襲）----
+  GRADLE_VERSION: '8.9'
+  JAVA_VERSION: '17'
+  NDK_VERSION: '26.3.11579264'
+  CMAKE_VERSION: '3.22.1'
+  # ---- llama.cpp のピン留め ----
+  # ternary(Q2_0) を使うなら PrismML fork の prism ブランチが必須。
+  # 1bit(Q1_0) だけなら upstream ggml-org/llama.cpp でも可。
+  # 初回グリーン後、下のログに出る SHA をここに貼って固定すること。
+  LLAMA_REPO: ${{ github.event.inputs.llama_repo || 'https://github.com/PrismML-Eng/llama.cpp' }}
+  LLAMA_REF:  ${{ github.event.inputs.llama_ref  || 'prism' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Install NDK / CMake (pinned)
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "ndk;${NDK_VERSION}" "cmake;${CMAKE_VERSION}" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> $GITHUB_ENV
+
+      - name: Fetch llama.cpp
+        run: |
+          git clone --depth 1 --branch "${LLAMA_REF}" "${LLAMA_REPO}" app/src/main/cpp/llama.cpp \
+            || git clone "${LLAMA_REPO}" app/src/main/cpp/llama.cpp
+          cd app/src/main/cpp/llama.cpp
+          git checkout "${LLAMA_REF}" 2>/dev/null || true
+          echo "=============================================="
+          echo " PIN THIS SHA -> $(git rev-parse HEAD)"
+          echo "=============================================="
+
+      - name: Cache native build
+        uses: actions/cache@v4
+        with:
+          path: app/.cxx
+          key: cxx-${{ env.NDK_VERSION }}-${{ env.LLAMA_REF }}-${{ hashFiles('app/src/main/cpp/CMakeLists.txt','app/src/main/cpp/llama_jni.cpp') }}
+          restore-keys: cxx-${{ env.NDK_VERSION }}-${{ env.LLAMA_REF }}-
+
+      - name: Set up Gradle (no wrapper)
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Build APK
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Rename artifact
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk \
+             "out/BonsaiApp-$(date +%Y%m%d)-${GITHUB_SHA::7}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BonsaiApp-debug
+          path: out/*.apk
