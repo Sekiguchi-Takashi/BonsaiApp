@@ -2,10 +2,13 @@ package com.appathy.bonsai
 
 import android.app.Activity
 import android.app.ActivityManager
+import android.Manifest
+import android.content.pm.PackageManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -36,13 +39,18 @@ class MainActivity : Activity() {
             "回答は必ず日本語だけで書いてください。" +
             "中国語・簡体字・英語は使わないでください。"
         private const val UI_INTERVAL_MS = 60L
+        private const val SERVER_PORT = 8080
+        // true にすると LAN の他端末からも到達できるが、認証が無い点に注意
+        private const val BIND_ALL = false
     }
 
-    private val llama = LlamaBridge()
+    private val llama get() = Engine.bridge
     private val ui = Handler(Looper.getMainLooper())
 
     private lateinit var status: TextView
     private lateinit var pickBtn: Button
+    private lateinit var serverBtn: Button
+    private lateinit var serverInfo: TextView
     private lateinit var input: EditText
     private lateinit var output: TextView
     private lateinit var runBtn: Button
@@ -73,6 +81,21 @@ class MainActivity : Activity() {
             setOnClickListener { pickModel() }
         }
         root.addView(pickBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        serverBtn = Button(this).apply {
+            text = "サーバー起動"
+            isEnabled = false
+            setOnClickListener { toggleServer() }
+        }
+        root.addView(serverBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        serverInfo = TextView(this).apply {
+            setTextColor(Color.parseColor("#63BA80"))
+            textSize = 12f
+            setTextIsSelectable(true)
+            text = ""
+        }
+        root.addView(serverInfo)
 
         input = EditText(this).apply {
             hint = "プロンプトを入力"
@@ -196,8 +219,40 @@ class MainActivity : Activity() {
                 else
                     "読込失敗。RAM不足の可能性（空き ${freeRamMb()}MB）"
                 runBtn.isEnabled = ok
+                serverBtn.isEnabled = ok
+                refreshServerInfo()
             }
         }
+    }
+
+    // ---------- OpenAI互換サーバー ----------
+
+    private fun toggleServer() {
+        if (ServerService.isRunning) {
+            ServerService.stop(this)
+        } else {
+            if (Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2001)
+            }
+            ServerService.start(this, SERVER_PORT, BIND_ALL)
+        }
+        // サービス起動は非同期なので少し待ってから反映
+        ui.postDelayed({ refreshServerInfo() }, 400)
+    }
+
+    private fun refreshServerInfo() {
+        val on = ServerService.isRunning
+        serverBtn.text = if (on) "サーバー停止" else "サーバー起動"
+        serverInfo.text = if (on)
+            "http://127.0.0.1:$SERVER_PORT/v1\nOpenAI互換 / api_key は任意の文字列で可"
+        else ""
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::serverBtn.isInitialized) refreshServerInfo()
     }
 
     private fun threadCount() =
@@ -239,7 +294,11 @@ class MainActivity : Activity() {
         var dirty = false
 
         thread {
-            llama.generate(SYSTEM_PROMPT, prompt, MAX_TOKENS,
+            val msgs = listOf(
+                LlamaBridge.Msg("system", SYSTEM_PROMPT),
+                LlamaBridge.Msg("user", prompt)
+            )
+            Engine.generate(msgs, LlamaBridge.Params(maxTokens = MAX_TOKENS),
                 object : LlamaBridge.TokenCallback {
                     override fun onToken(piece: String) {
                         synchronized(sb) { sb.append(piece) }
@@ -271,7 +330,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         llama.stop()
-        llama.free()
+        // サーバー稼働中は他アプリが使うのでモデルを解放しない
+        if (!ServerService.isRunning) llama.free()
         super.onDestroy()
     }
 }

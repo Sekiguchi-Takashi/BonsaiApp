@@ -1,5 +1,9 @@
 // llama_jni.cpp v0.3
 //
+// v0.6 の変更:
+//   - messages[] 配列に対応（OpenAI互換サーバー用のマルチターン）
+//   - サンプラをリクエスト単位で構築（temperature 等をAPI経由で指定可能に）
+//
 // v0.5 の変更:
 //   - 簡体字トークンを logit bias で禁止（言語ドリフト対策）
 //   - システムプロンプトを Kotlin 側から指定
@@ -39,7 +43,7 @@ namespace {
 struct Session {
     llama_model   * model = nullptr;
     llama_context * ctx   = nullptr;
-    llama_sampler * smpl  = nullptr;
+    int n_vocab = 0;
     std::vector<llama_logit_bias> biases;   // sampler より長生きさせる
     std::atomic<bool> stop{false};
 };
@@ -139,24 +143,30 @@ bool contains_any_cp(const std::string & s, const std::set<uint32_t> & banned) {
 // GGUF 埋め込みのチャットテンプレートを適用する。
 // 取得できなければ ChatML でフォールバック。
 std::string apply_chat_template(const llama_model * model,
-                                const std::string & system,
-                                const std::string & user) {
+                                const std::vector<std::string> & roles,
+                                const std::vector<std::string> & contents) {
     const char * tmpl = llama_model_chat_template(model, nullptr);
 
     if (tmpl == nullptr) {
         LOGI("no embedded chat template, falling back to ChatML");
         std::string s;
-        if (!system.empty())
-            s += "<|im_start|>system\n" + system + "<|im_end|>\n";
-        s += "<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
+        for (size_t i = 0; i < roles.size(); i++) {
+            s += "<|im_start|>" + roles[i] + "\n" + contents[i] + "<|im_end|>\n";
+        }
+        s += "<|im_start|>assistant\n";
         return s;
     }
 
     std::vector<llama_chat_message> msgs;
-    if (!system.empty()) msgs.push_back({"system", system.c_str()});
-    msgs.push_back({"user", user.c_str()});
+    msgs.reserve(roles.size());
+    for (size_t i = 0; i < roles.size(); i++) {
+        msgs.push_back({ roles[i].c_str(), contents[i].c_str() });
+    }
 
-    std::vector<char> buf(system.size() + user.size() + 2048);
+    size_t total = 0;
+    for (size_t i = 0; i < roles.size(); i++) total += roles[i].size() + contents[i].size();
+
+    std::vector<char> buf(total + 2048);
     // 第4引数 true = 末尾に assistant 開始タグを付ける
     int32_t n = llama_chat_apply_template(tmpl, msgs.data(), msgs.size(),
                                           true, buf.data(), (int32_t) buf.size());
@@ -166,8 +176,8 @@ std::string apply_chat_template(const llama_model * model,
                                       true, buf.data(), (int32_t) buf.size());
     }
     if (n < 0) {
-        LOGE("chat template apply failed, using raw prompt");
-        return user;
+        LOGE("chat template apply failed, using raw last message");
+        return contents.empty() ? std::string() : contents.back();
     }
     return std::string(buf.data(), n);
 }
@@ -225,9 +235,8 @@ Java_com_appathy_bonsai_LlamaBridge_nativeLoad(
     s->model = model;
     s->ctx   = ctx;
 
-    llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
-
     // 簡体字トークンの禁止。語彙全走査は数十msで済む。
+    // バイアス自体は Session に保持し、サンプラはリクエストごとに組み直す。
     if (banSimplified) {
         const llama_vocab * vocab = llama_model_get_vocab(model);
         const std::set<uint32_t> banned = decode_utf8_set(kSimplifiedOnly);
@@ -238,21 +247,8 @@ Java_com_appathy_bonsai_LlamaBridge_nativeLoad(
             }
         }
         LOGI("banned %zu / %d tokens (simplified chinese)", s->biases.size(), n_vocab);
-        if (!s->biases.empty()) {
-            llama_sampler_chain_add(smpl,
-                llama_sampler_init_logit_bias(n_vocab,
-                                              (int32_t) s->biases.size(),
-                                              s->biases.data()));
-        }
     }
-
-    // Bonsai 公式推奨は temp 0.5 だが、言語ドリフト抑制のため 0.35 に下げている
-    llama_sampler_chain_add(smpl, llama_sampler_init_top_k(20));
-    llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.90f, 1));
-    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.35f));
-    llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
-
-    s->smpl  = smpl;
+    s->n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(model));
 
     LOGI("loaded, n_ctx=%d threads=%d kv=q8_0 mmap=on", nCtx, nThreads);
     return reinterpret_cast<jlong>(s);
@@ -261,7 +257,9 @@ Java_com_appathy_bonsai_LlamaBridge_nativeLoad(
 JNIEXPORT void JNICALL
 Java_com_appathy_bonsai_LlamaBridge_nativeGenerate(
         JNIEnv * env, jobject, jlong handle,
-        jstring jSystem, jstring jPrompt, jint maxTokens, jobject callback) {
+        jobjectArray jRoles, jobjectArray jContents,
+        jint maxTokens, jfloat temp, jfloat topP, jint topK, jint seed,
+        jobject callback) {
 
     auto * s = reinterpret_cast<Session *>(handle);
     if (!s) return;
@@ -270,11 +268,24 @@ Java_com_appathy_bonsai_LlamaBridge_nativeGenerate(
 
     const llama_vocab * vocab = llama_model_get_vocab(s->model);
 
-    const char * cSystem = env->GetStringUTFChars(jSystem, nullptr);
-    const char * cPrompt = env->GetStringUTFChars(jPrompt, nullptr);
-    std::string formatted = apply_chat_template(s->model, cSystem, cPrompt);
-    env->ReleaseStringUTFChars(jSystem, cSystem);
-    env->ReleaseStringUTFChars(jPrompt, cPrompt);
+    // ---- messages[] を取り出す ----
+    const jsize n_msg = env->GetArrayLength(jRoles);
+    std::vector<std::string> roles, contents;
+    roles.reserve(n_msg); contents.reserve(n_msg);
+    for (jsize i = 0; i < n_msg; i++) {
+        auto jr = (jstring) env->GetObjectArrayElement(jRoles, i);
+        auto jc = (jstring) env->GetObjectArrayElement(jContents, i);
+        const char * r = env->GetStringUTFChars(jr, nullptr);
+        const char * c = env->GetStringUTFChars(jc, nullptr);
+        roles.emplace_back(r);
+        contents.emplace_back(c);
+        env->ReleaseStringUTFChars(jr, r);
+        env->ReleaseStringUTFChars(jc, c);
+        env->DeleteLocalRef(jr);
+        env->DeleteLocalRef(jc);
+    }
+
+    std::string formatted = apply_chat_template(s->model, roles, contents);
 
     // テンプレートが特殊トークンを含むので add_special=false / parse_special=true
     int n_needed = -llama_tokenize(vocab, formatted.c_str(), (int32_t) formatted.size(),
@@ -287,7 +298,21 @@ Java_com_appathy_bonsai_LlamaBridge_nativeGenerate(
     llama_tokenize(vocab, formatted.c_str(), (int32_t) formatted.size(),
                    tokens.data(), n_needed, false, true);
 
-    LOGI("prompt tokens = %d", n_needed);
+    LOGI("messages=%d prompt_tokens=%d temp=%.2f", (int) n_msg, n_needed, (double) temp);
+
+    // ---- サンプラをリクエスト単位で構築 ----
+    llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    if (!s->biases.empty()) {
+        llama_sampler_chain_add(smpl,
+            llama_sampler_init_logit_bias(s->n_vocab,
+                                          (int32_t) s->biases.size(),
+                                          s->biases.data()));
+    }
+    if (topK > 0)   llama_sampler_chain_add(smpl, llama_sampler_init_top_k(topK));
+    if (topP < 1.0f) llama_sampler_chain_add(smpl, llama_sampler_init_top_p(topP, 1));
+    llama_sampler_chain_add(smpl, llama_sampler_init_temp(temp));
+    llama_sampler_chain_add(smpl, llama_sampler_init_dist(
+        seed < 0 ? LLAMA_DEFAULT_SEED : (uint32_t) seed));
 
     // 前回の生成が残っていると文脈が壊れるので毎回リセット
     llama_memory_clear(llama_get_memory(s->ctx), true);
@@ -310,10 +335,10 @@ Java_com_appathy_bonsai_LlamaBridge_nativeGenerate(
             break;
         }
 
-        llama_token id = llama_sampler_sample(s->smpl, s->ctx, -1);
+        llama_token id = llama_sampler_sample(smpl, s->ctx, -1);
         if (llama_vocab_is_eog(vocab, id)) break;
 
-        llama_sampler_accept(s->smpl, id);
+        llama_sampler_accept(smpl, id);
 
         pending += piece_of(vocab, id);
 
@@ -332,6 +357,8 @@ Java_com_appathy_bonsai_LlamaBridge_nativeGenerate(
     if (!pending.empty() && incomplete_utf8_len(pending) == 0) {
         emit(env, callback, onTok, pending);
     }
+
+    llama_sampler_free(smpl);
 }
 
 JNIEXPORT void JNICALL
@@ -344,7 +371,6 @@ JNIEXPORT void JNICALL
 Java_com_appathy_bonsai_LlamaBridge_nativeFree(JNIEnv *, jobject, jlong handle) {
     auto * s = reinterpret_cast<Session *>(handle);
     if (!s) return;
-    if (s->smpl)  llama_sampler_free(s->smpl);
     if (s->ctx)   llama_free(s->ctx);
     if (s->model) llama_model_free(s->model);
     delete s;

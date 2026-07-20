@@ -3,11 +3,19 @@ package com.appathy.bonsai
 /**
  * llama.cpp への薄いラッパ。
  *
- * v0.4: ネイティブからは ByteArray でトークンを受け取り、Kotlin側で
- * UTF-8 デコードする。NewStringUTF は Modified UTF-8 しか扱えず、
- * 日本語の分割トークンや絵文字で JVM が abort するため。
+ * v0.6: messages[] に対応。サンプリングパラメータはリクエスト単位で渡す。
  */
 class LlamaBridge {
+
+    data class Msg(val role: String, val content: String)
+
+    data class Params(
+        val maxTokens: Int = 512,
+        val temperature: Float = 0.35f,
+        val topP: Float = 0.90f,
+        val topK: Int = 20,
+        val seed: Int = -1
+    )
 
     interface TokenCallback {
         fun onToken(piece: String)
@@ -40,14 +48,15 @@ class LlamaBridge {
         return handle != 0L
     }
 
-    fun generate(
-        system: String,
-        prompt: String,
-        maxTokens: Int = 256,
-        cb: TokenCallback
-    ) {
-        if (handle == 0L) return
-        nativeGenerate(handle, system, prompt, maxTokens, NativeSink(cb))
+    fun generate(messages: List<Msg>, params: Params, cb: TokenCallback) {
+        if (handle == 0L || messages.isEmpty()) return
+        nativeGenerate(
+            handle,
+            messages.map { it.role }.toTypedArray(),
+            messages.map { it.content }.toTypedArray(),
+            params.maxTokens, params.temperature, params.topP, params.topK, params.seed,
+            NativeSink(cb)
+        )
     }
 
     fun stop() {
@@ -64,9 +73,15 @@ class LlamaBridge {
     private external fun nativeLoad(
         path: String, nCtx: Int, nThreads: Int, banSimplified: Boolean
     ): Long
+
     private external fun nativeGenerate(
-        h: Long, system: String, prompt: String, maxTokens: Int, sink: Any
+        h: Long,
+        roles: Array<String>,
+        contents: Array<String>,
+        maxTokens: Int, temperature: Float, topP: Float, topK: Int, seed: Int,
+        sink: Any
     )
+
     private external fun nativeStop(h: Long)
     private external fun nativeFree(h: Long)
 
