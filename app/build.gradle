@@ -13,8 +13,8 @@ android {
         // llama.cpp の Android ビルドは android-28 以上が前提
         minSdk 28
         targetSdk 34
-        versionCode 3
-        versionName "0.3"
+        versionCode 4
+        versionName "0.4"
 
         ndk {
             // arm64 のみ。x86_64 も足すとビルド時間がほぼ倍になる
