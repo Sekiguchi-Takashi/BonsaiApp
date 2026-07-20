@@ -2,7 +2,8 @@ package com.appathy.bonsai
 
 /**
  * llama.cpp への薄いラッパ。
- * 呼び出しは必ずワーカースレッドから（推論はブロッキング）。
+ * generate() はブロッキングなので必ずワーカースレッドから呼ぶこと。
+ * stop() だけはメインスレッドから呼んでよい（atomic フラグを立てるだけ）。
  */
 class LlamaBridge {
 
@@ -14,15 +15,24 @@ class LlamaBridge {
 
     val isLoaded: Boolean get() = handle != 0L
 
-    fun load(modelPath: String, nCtx: Int = 2048, nThreads: Int = 4): Boolean {
+    fun load(modelPath: String, nCtx: Int = 1024, nThreads: Int = 4): Boolean {
         if (handle != 0L) free()
         handle = nativeLoad(modelPath, nCtx, nThreads)
         return handle != 0L
     }
 
-    fun generate(prompt: String, maxTokens: Int = 256, cb: TokenCallback) {
+    fun generate(
+        system: String,
+        prompt: String,
+        maxTokens: Int = 256,
+        cb: TokenCallback
+    ) {
         if (handle == 0L) return
-        nativeGenerate(handle, prompt, maxTokens, cb)
+        nativeGenerate(handle, system, prompt, maxTokens, cb)
+    }
+
+    fun stop() {
+        if (handle != 0L) nativeStop(handle)
     }
 
     fun free() {
@@ -33,7 +43,10 @@ class LlamaBridge {
     }
 
     private external fun nativeLoad(path: String, nCtx: Int, nThreads: Int): Long
-    private external fun nativeGenerate(h: Long, prompt: String, maxTokens: Int, cb: TokenCallback)
+    private external fun nativeGenerate(
+        h: Long, system: String, prompt: String, maxTokens: Int, cb: TokenCallback
+    )
+    private external fun nativeStop(h: Long)
     private external fun nativeFree(h: Long)
 
     companion object {

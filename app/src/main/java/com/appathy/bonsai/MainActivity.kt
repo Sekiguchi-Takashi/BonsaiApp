@@ -1,6 +1,8 @@
 package com.appathy.bonsai
 
 import android.app.Activity
+import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
@@ -16,16 +18,21 @@ import java.io.FileOutputStream
 import kotlin.concurrent.thread
 
 /**
- * v0.2
- * Android 11+ のスコープドストレージにより /sdcard/Android/data/ が外部から
- * 触れないため、SAF（ACTION_OPEN_DOCUMENT）でモデルを取り込み、
- * アプリ内部ストレージ（filesDir）へコピーして使う。
- * 権限宣言は一切不要。
+ * v0.3
+ *  - UI更新を 60ms 間引き（1トークンごとの全文字列再設定をやめる）
+ *  - 停止ボタン
+ *  - Qwen3 系の <think> ブロックを表示から除去
+ *  - 空きRAM表示
+ *  - n_ctx を 1024 に（8B / 低RAM端末向け）
  */
 class MainActivity : Activity() {
 
     companion object {
         private const val REQ_PICK = 1001
+        private const val N_CTX = 1024
+        private const val MAX_TOKENS = 512
+        private const val SYSTEM_PROMPT = "You are a helpful assistant"
+        private const val UI_INTERVAL_MS = 60L
     }
 
     private val llama = LlamaBridge()
@@ -36,6 +43,8 @@ class MainActivity : Activity() {
     private lateinit var input: EditText
     private lateinit var output: TextView
     private lateinit var runBtn: Button
+
+    @Volatile private var generating = false
 
     private fun modelFile() = File(filesDir, "model.gguf")
 
@@ -73,7 +82,9 @@ class MainActivity : Activity() {
         runBtn = Button(this).apply {
             text = "生成"
             isEnabled = false
-            setOnClickListener { generate() }
+            setOnClickListener {
+                if (generating) llama.stop() else generate()
+            }
         }
         root.addView(runBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
@@ -88,6 +99,15 @@ class MainActivity : Activity() {
 
         setContentView(root)
         loadModel()
+    }
+
+    // ---------- メモリ ----------
+
+    private fun freeRamMb(): Long {
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val mi = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(mi)
+        return mi.availMem / 1024 / 1024
     }
 
     // ---------- モデル取込（SAF） ----------
@@ -116,7 +136,7 @@ class MainActivity : Activity() {
             try {
                 contentResolver.openInputStream(uri)!!.use { ins ->
                     FileOutputStream(tmp).use { out ->
-                        val buf = ByteArray(1 shl 20)   // 1MB
+                        val buf = ByteArray(1 shl 20)
                         var total = 0L
                         var lastPost = 0L
                         while (true) {
@@ -124,7 +144,6 @@ class MainActivity : Activity() {
                             if (n < 0) break
                             out.write(buf, 0, n)
                             total += n
-                            // 8MBごとにUI更新（毎回postすると重い）
                             if (total - lastPost >= 8L * 1024 * 1024) {
                                 lastPost = total
                                 val mb = total / 1024 / 1024
@@ -138,7 +157,6 @@ class MainActivity : Activity() {
                 if (!tmp.renameTo(dst)) throw IllegalStateException("rename failed")
 
                 ui.post {
-                    status.text = "取込完了。読込します…"
                     pickBtn.isEnabled = true
                     loadModel()
                 }
@@ -162,14 +180,18 @@ class MainActivity : Activity() {
             return
         }
         pickBtn.text = "モデルを再選択"
-        status.text = "モデル読込中… (${f.length() / 1024 / 1024} MB)"
+        val sizeMb = f.length() / 1024 / 1024
+        status.text = "読込中… ${sizeMb}MB / 空きRAM ${freeRamMb()}MB"
+
         thread {
             val t0 = System.currentTimeMillis()
-            val ok = llama.load(f.absolutePath, nCtx = 2048, nThreads = threadCount())
+            val ok = llama.load(f.absolutePath, nCtx = N_CTX, nThreads = threadCount())
             val ms = System.currentTimeMillis() - t0
             ui.post {
-                status.text = if (ok) "読込完了 ${ms}ms / threads=${threadCount()}"
-                              else "読込失敗（logcat を確認）"
+                status.text = if (ok)
+                    "読込完了 ${ms}ms / threads=${threadCount()} / 空きRAM ${freeRamMb()}MB"
+                else
+                    "読込失敗。RAM不足の可能性（空き ${freeRamMb()}MB）"
                 runBtn.isEnabled = ok
             }
         }
@@ -180,32 +202,63 @@ class MainActivity : Activity() {
 
     // ---------- 生成 ----------
 
+    /** Qwen3 系が出す <think>…</think> を表示から除去する */
+    private fun strip(raw: String): String {
+        val closed = Regex("(?s)<think>.*?</think>").replace(raw, "")
+        // 閉じタグがまだ来ていない途中経過も隠す
+        val idx = closed.indexOf("<think>")
+        val s = if (idx >= 0) closed.substring(0, idx) else closed
+        return s.trimStart()
+    }
+
     private fun generate() {
         val prompt = input.text.toString()
-        runBtn.isEnabled = false
+        generating = true
+        runBtn.text = "停止"
         pickBtn.isEnabled = false
         output.text = ""
+
         val sb = StringBuilder()
         var n = 0
         val t0 = System.currentTimeMillis()
 
+        // UI更新の間引き
+        var lastUi = 0L
+        var dirty = false
+
         thread {
-            llama.generate(prompt, maxTokens = 256, cb = object : LlamaBridge.TokenCallback {
-                override fun onToken(piece: String) {
-                    sb.append(piece); n++
-                    ui.post { output.text = sb.toString() }
-                }
-            })
+            llama.generate(SYSTEM_PROMPT, prompt, MAX_TOKENS,
+                object : LlamaBridge.TokenCallback {
+                    override fun onToken(piece: String) {
+                        synchronized(sb) { sb.append(piece) }
+                        n++
+                        val now = System.currentTimeMillis()
+                        if (now - lastUi >= UI_INTERVAL_MS) {
+                            lastUi = now
+                            dirty = false
+                            val text = synchronized(sb) { sb.toString() }
+                            ui.post { output.text = strip(text) }
+                        } else {
+                            dirty = true
+                        }
+                    }
+                })
+
             val sec = (System.currentTimeMillis() - t0) / 1000.0
+            val text = synchronized(sb) { sb.toString() }
             ui.post {
-                status.text = "%d tok / %.1fs = %.1f tok/s".format(n, sec, n / sec)
-                runBtn.isEnabled = true
+                if (dirty) output.text = strip(text)
+                status.text = "%d tok / %.1fs = %.2f tok/s / 空きRAM %dMB"
+                    .format(n, sec, if (sec > 0) n / sec else 0.0, freeRamMb())
+                generating = false
+                runBtn.text = "生成"
                 pickBtn.isEnabled = true
             }
         }
     }
 
     override fun onDestroy() {
+        llama.stop()
         llama.free()
         super.onDestroy()
     }
