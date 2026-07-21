@@ -18,6 +18,7 @@ import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.*
 import java.io.File
 import java.io.FileOutputStream
+import com.appathy.bonsai.mail.Pipeline
 import kotlin.concurrent.thread
 
 /**
@@ -55,6 +56,9 @@ class MainActivity : Activity() {
     private lateinit var serverBtn: Button
     private lateinit var ragBtn: Button
     private lateinit var mailBtn: Button
+    private lateinit var ragToggle: Button
+    private var useRag = true
+    private val pipeline by lazy { Pipeline(applicationContext) }
     private lateinit var serverInfo: TextView
     private lateinit var input: EditText
     private lateinit var output: TextView
@@ -95,7 +99,7 @@ class MainActivity : Activity() {
         root.addView(serverBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         ragBtn = Button(this).apply {
-            text = "RAG設定 (OneDrive)"
+            text = "RAG設定 (資料フォルダ)"
             setOnClickListener { startActivity(Intent(this@MainActivity, RagActivity::class.java)) }
         }
         root.addView(ragBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
@@ -122,6 +126,14 @@ class MainActivity : Activity() {
         }
         root.addView(input, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
+        ragToggle = Button(this).apply {
+            setOnClickListener {
+                useRag = !useRag
+                updateRagToggle()
+            }
+        }
+        root.addView(ragToggle, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
         runBtn = Button(this).apply {
             text = "生成"
             isEnabled = false
@@ -140,6 +152,7 @@ class MainActivity : Activity() {
         root.addView(ScrollView(this).apply { addView(output) },
             LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
+        updateRagToggle()
         setContentView(root)
         loadModel()
     }
@@ -301,6 +314,11 @@ class MainActivity : Activity() {
         return s.trimStart()
     }
 
+    private fun updateRagToggle() {
+        ragToggle.text = if (useRag) "RAG参照: ON（資料を検索して答える）"
+                         else "RAG参照: OFF（モデル単独で答える）"
+    }
+
     private fun generate() {
         val prompt = input.text.toString()
         generating = true
@@ -311,37 +329,58 @@ class MainActivity : Activity() {
         val sb = StringBuilder()
         var n = 0
         val t0 = System.currentTimeMillis()
-
-        // UI更新の間引き
         var lastUi = 0L
         var dirty = false
 
+        fun push(piece: String) {
+            synchronized(sb) { sb.append(piece) }
+            n++
+            val now = System.currentTimeMillis()
+            if (now - lastUi >= UI_INTERVAL_MS) {
+                lastUi = now; dirty = false
+                val text = synchronized(sb) { sb.toString() }
+                ui.post { output.text = strip(text) }
+            } else dirty = true
+        }
+
         thread {
-            val msgs = listOf(
-                LlamaBridge.Msg("system", SYSTEM_PROMPT),
-                LlamaBridge.Msg("user", prompt)
-            )
-            Engine.generate(msgs, LlamaBridge.Params(maxTokens = MAX_TOKENS),
-                object : LlamaBridge.TokenCallback {
-                    override fun onToken(piece: String) {
-                        synchronized(sb) { sb.append(piece) }
-                        n++
-                        val now = System.currentTimeMillis()
-                        if (now - lastUi >= UI_INTERVAL_MS) {
-                            lastUi = now
-                            dirty = false
-                            val text = synchronized(sb) { sb.toString() }
-                            ui.post { output.text = strip(text) }
-                        } else {
-                            dirty = true
-                        }
-                    }
-                })
+            var sources = emptyList<String>()
+            try {
+                if (useRag) {
+                    ui.post { status.text = "資料を検索中…" }
+                    val out = pipeline.answer(
+                        searchQuery = prompt,
+                        userBlock = { context ->
+                            "【参考資料】\n" + context + "\n\n【質問】\n" + prompt +
+                            "\n\n参考資料に基づいて回答してください。"
+                        },
+                        onToken = { push(it) }
+                    )
+                    sources = out.sources
+                } else {
+                    Engine.generate(
+                        listOf(
+                            LlamaBridge.Msg("system", SYSTEM_PROMPT),
+                            LlamaBridge.Msg("user", prompt)
+                        ),
+                        LlamaBridge.Params(maxTokens = MAX_TOKENS),
+                        object : LlamaBridge.TokenCallback {
+                            override fun onToken(piece: String) { push(piece) }
+                        })
+                }
+            } catch (e: Exception) {
+                ui.post { output.text = "エラー: " + e.message }
+            }
 
             val sec = (System.currentTimeMillis() - t0) / 1000.0
             val text = synchronized(sb) { sb.toString() }
             ui.post {
                 if (dirty) output.text = strip(text)
+                if (useRag) {
+                    output.append(
+                        if (sources.isEmpty()) "\n\n（参照した資料なし）"
+                        else "\n\n参照: " + sources.joinToString(", "))
+                }
                 status.text = "%d tok / %.1fs = %.2f tok/s / 空きRAM %dMB"
                     .format(n, sec, if (sec > 0) n / sec else 0.0, freeRamMb())
                 generating = false

@@ -14,7 +14,7 @@ import com.appathy.bonsai.rag.RagDb
  * n_ctx が 2048 しかないので、**文脈の予算管理が要**になる。
  * 資料を詰め込みすぎると質問本文が押し出され、回答が破綻する。
  */
-class Pipeline(ctx: Context, private val queue: MailQueue) {
+class Pipeline(ctx: Context) {
 
     companion object {
         private const val TAG = "Pipeline"
@@ -46,24 +46,14 @@ class Pipeline(ctx: Context, private val queue: MailQueue) {
 
     data class Outcome(val answer: String, val sources: List<String>, val ms: Long)
 
-    /**
-     * 検索クエリを作る。
-     * 件名は情報密度が高いので重視し、本文は先頭を使う
-     * （メールは冒頭に用件が来ることが多く、末尾は署名で埋まるため）。
-     */
-    private fun buildQuery(item: MailQueue.Item): String =
-        (item.subject + " " + item.subject + " " + item.body.take(300)).trim()
-
-    fun process(item: MailQueue.Item): Outcome {
-        val t0 = System.currentTimeMillis()
-
+    /** 検索して、予算内に収めた参考資料テキストと出典名を返す */
+    fun retrieve(query: String): Pair<String, List<String>> {
         val hits = try {
-            rag.search(buildQuery(item), TOP_K)
+            rag.search(query, TOP_K)
         } catch (e: Exception) {
             Log.e(TAG, "search failed", e); emptyList()
         }
 
-        // 予算内に収まるまで上位から詰める
         val used = ArrayList<String>()
         val sources = ArrayList<String>()
         var budget = MAX_CONTEXT_CHARS
@@ -79,35 +69,67 @@ class Pipeline(ctx: Context, private val queue: MailQueue) {
             "（該当する資料は見つかりませんでした）"
         else used.joinToString("\n\n")
 
-        val question = buildString {
-            append("【参考資料】\n").append(context).append("\n\n")
-            append("【受信メール】\n")
-            append("差出人: ").append(item.sender.take(80)).append('\n')
-            append("件名: ").append(item.subject.take(120)).append('\n')
-            append("本文:\n").append(item.body.take(MAX_QUESTION_CHARS)).append("\n\n")
-            append("上記メールへの回答案を作成してください。")
-        }
+        return Pair(context, sources)
+    }
+
+    /**
+     * 汎用の RAG 応答。トップ画面からもメール処理からも使う。
+     * @param searchQuery 検索に使う文字列
+     * @param userBlock   LLM に渡す user メッセージ本体
+     * @param onToken     ストリーミング表示が要る場合に渡す
+     */
+    fun answer(
+        searchQuery: String,
+        userBlock: (context: String) -> String,
+        onToken: ((String) -> Unit)? = null
+    ): Outcome {
+        val t0 = System.currentTimeMillis()
+        val (context, sources) = retrieve(searchQuery)
 
         val sb = StringBuilder()
         Engine.generate(
             listOf(
                 LlamaBridge.Msg("system", SYSTEM),
-                LlamaBridge.Msg("user", question)
+                LlamaBridge.Msg("user", userBlock(context))
             ),
             LlamaBridge.Params(maxTokens = MAX_ANSWER_TOKENS, temperature = 0.3f),
             object : LlamaBridge.TokenCallback {
-                override fun onToken(piece: String) { sb.append(piece) }
+                override fun onToken(piece: String) {
+                    sb.append(piece)
+                    onToken?.invoke(piece)
+                }
             }
         )
 
-        val answer = clean(sb.toString())
-        val ms = System.currentTimeMillis() - t0
+        return Outcome(clean(sb.toString()), sources, System.currentTimeMillis() - t0)
+    }
 
-        val withSources = if (sources.isEmpty()) answer
-            else answer + "\n\n参照: " + sources.joinToString(", ")
+    /**
+     * 検索クエリを作る。
+     * 件名は情報密度が高いので重視し、本文は先頭を使う
+     * （メールは冒頭に用件が来ることが多く、末尾は署名で埋まるため）。
+     */
+    private fun buildQuery(item: MailQueue.Item): String =
+        (item.subject + " " + item.subject + " " + item.body.take(300)).trim()
 
-        Log.i(TAG, "processed uid=${item.uid} in ${ms}ms, sources=${sources.size}")
-        return Outcome(withSources, sources, ms)
+    fun process(item: MailQueue.Item): Outcome {
+        val out = answer(
+            searchQuery = buildQuery(item),
+            userBlock = { context ->
+                buildString {
+                    append("【参考資料】\n").append(context).append("\n\n")
+                    append("【受信メール】\n")
+                    append("差出人: ").append(item.sender.take(80)).append('\n')
+                    append("件名: ").append(item.subject.take(120)).append('\n')
+                    append("本文:\n").append(item.body.take(MAX_QUESTION_CHARS)).append("\n\n")
+                    append("上記メールへの回答案を作成してください。")
+                }
+            }
+        )
+        val withSources = if (out.sources.isEmpty()) out.answer
+            else out.answer + "\n\n参照: " + out.sources.joinToString(", ")
+        Log.i(TAG, "processed uid=${item.uid} in ${out.ms}ms, sources=${out.sources.size}")
+        return out.copy(answer = withSources)
     }
 
     /** 表示用の後処理。think ブロックと Markdown 記法を落とす */

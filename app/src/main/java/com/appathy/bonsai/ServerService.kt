@@ -162,7 +162,7 @@ class ServerService : Service() {
 
     private fun startServerInternal(port: Int, bindAll: Boolean) {
         if (server == null) {
-            server = LlamaServer(port, bindAll).also { it.start() }
+            server = LlamaServer(port, bindAll, applicationContext).also { it.start() }
         }
         ensureModelLoaded()
     }
@@ -193,7 +193,7 @@ class ServerService : Service() {
         if (pipelineThread?.isAlive == true) return
 
         pipelineThread = thread(name = "mail-pipeline") {
-            val pipeline = Pipeline(applicationContext, queue)
+            val pipeline = Pipeline(applicationContext)
             Log.i(TAG, "pipeline started")
 
             while (prefs.getBoolean(K_MAIL, false)) {

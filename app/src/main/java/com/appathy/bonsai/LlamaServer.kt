@@ -2,6 +2,7 @@ package com.appathy.bonsai
 
 import android.util.Log
 import org.json.JSONArray
+import com.appathy.bonsai.mail.Pipeline
 import org.json.JSONObject
 import java.io.BufferedOutputStream
 import java.io.InputStream
@@ -28,7 +29,8 @@ import kotlin.concurrent.thread
  */
 class LlamaServer(
     private val port: Int = 8080,
-    private val bindAll: Boolean = false
+    private val bindAll: Boolean = false,
+    private val ctxRef: android.content.Context
 ) {
 
     companion object {
@@ -176,7 +178,7 @@ class LlamaServer(
             sendJson(out, 400, errorObj("messages is required", "invalid_request_error")); return
         }
 
-        val messages = ArrayList<LlamaBridge.Msg>(arr.length())
+        val messages: MutableList<LlamaBridge.Msg> = ArrayList(arr.length())
         for (i in 0 until arr.length()) {
             val m = arr.optJSONObject(i) ?: continue
             val role = m.optString("role", "user")
@@ -191,6 +193,18 @@ class LlamaServer(
                 else -> c?.toString() ?: ""
             }
             messages.add(LlamaBridge.Msg(role, content))
+        }
+
+        // "rag": true を付けると資料検索を挟む（OpenAI仕様の拡張）
+        val useRag = req.optBoolean("rag", false)
+        if (useRag) {
+            val q = messages.lastOrNull { it.role == "user" }?.content ?: ""
+            val (context, _) = Pipeline(ctxRef).retrieve(q)
+            val idx = messages.indexOfLast { it.role == "user" }
+            if (idx >= 0) {
+                messages[idx] = LlamaBridge.Msg("user",
+                    "【参考資料】\n" + context + "\n\n【質問】\n" + q)
+            }
         }
 
         val params = LlamaBridge.Params(
