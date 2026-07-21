@@ -32,7 +32,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_PICK = 1001
-        private const val N_CTX = 1024
+        private const val N_CTX = 2048   // RAG の文脈を積むため v0.7 で 2048 に戻した
         private const val MAX_TOKENS = 512
         private const val SYSTEM_PROMPT =
             "あなたは日本語で応答するアシスタントです。" +
@@ -50,6 +50,7 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var pickBtn: Button
     private lateinit var serverBtn: Button
+    private lateinit var ragBtn: Button
     private lateinit var serverInfo: TextView
     private lateinit var input: EditText
     private lateinit var output: TextView
@@ -88,6 +89,12 @@ class MainActivity : Activity() {
             setOnClickListener { toggleServer() }
         }
         root.addView(serverBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        ragBtn = Button(this).apply {
+            text = "RAG設定 (OneDrive)"
+            setOnClickListener { startActivity(Intent(this@MainActivity, RagActivity::class.java)) }
+        }
+        root.addView(ragBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         serverInfo = TextView(this).apply {
             setTextColor(Color.parseColor("#63BA80"))
