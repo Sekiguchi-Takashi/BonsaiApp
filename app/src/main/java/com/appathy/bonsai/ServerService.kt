@@ -12,6 +12,7 @@ import android.os.IBinder
 import android.util.Log
 import com.appathy.bonsai.mail.MailQueue
 import com.appathy.bonsai.mail.MailWatcher
+import com.appathy.bonsai.mail.Pipeline
 import java.io.File
 import kotlin.concurrent.thread
 
@@ -31,7 +32,9 @@ class ServerService : Service() {
     companion object {
         private const val TAG = "ServerService"
         const val CHANNEL_ID = "bonsai_service"
+        const val ANSWER_CHANNEL_ID = "bonsai_answer"
         const val NOTIF_ID = 1
+        const val NOTIF_ANSWER_ID = 2
 
         const val ACTION_START_SERVER = "com.appathy.bonsai.START_SERVER"
         const val ACTION_STOP_SERVER = "com.appathy.bonsai.STOP_SERVER"
@@ -50,6 +53,10 @@ class ServerService : Service() {
         @Volatile var server: LlamaServer? = null
             private set
         @Volatile var watcher: MailWatcher? = null
+            private set
+
+        /** 推論パイプラインの現在状態（UI表示用） */
+        @Volatile var pipelineStatus: String = "待機"
             private set
 
         val isServerRunning: Boolean get() = server?.running == true
@@ -115,6 +122,7 @@ class ServerService : Service() {
             ACTION_STOP_MAIL -> {
                 prefs.edit().putBoolean(K_MAIL, false).apply()
                 watcher?.stop(); watcher = null
+                stopPipeline()
             }
             else -> {
                 // intent == null はシステムによる再生成。保存状態に従う
@@ -143,6 +151,7 @@ class ServerService : Service() {
         Log.i(TAG, "all features off -> shutting down")
         server?.stop(); server = null
         watcher?.stop(); watcher = null
+        stopPipeline()
         // 画面が閉じているならモデルも解放してRAMを返す
         if (!MainActivity.isForeground) Engine.bridge.free()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -169,7 +178,85 @@ class ServerService : Service() {
             Log.e(TAG, "mail start failed", e)
             prefs.edit().putBoolean(K_MAIL, false).apply()
             watcher = null
+            return
         }
+        // 受信だけでは意味がないので、推論パイプラインも一緒に起動する
+        ensureModelLoaded()
+        startPipeline(q)
+    }
+
+    // --------------------------------------------------- 推論パイプライン
+
+    @Volatile private var pipelineThread: Thread? = null
+
+    private fun startPipeline(queue: MailQueue) {
+        if (pipelineThread?.isAlive == true) return
+
+        pipelineThread = thread(name = "mail-pipeline") {
+            val pipeline = Pipeline(applicationContext, queue)
+            Log.i(TAG, "pipeline started")
+
+            while (prefs.getBoolean(K_MAIL, false)) {
+                val item = queue.nextPending()
+                if (item == null) {
+                    pipelineStatus = "待機"
+                    try { Thread.sleep(3000) } catch (e: InterruptedException) { break }
+                    continue
+                }
+
+                if (!Engine.isLoaded) {
+                    pipelineStatus = "モデル未読込"
+                    updateNotification()
+                    try { Thread.sleep(5000) } catch (e: InterruptedException) { break }
+                    continue
+                }
+
+                pipelineStatus = "処理中: ${item.subject.take(20)}"
+                updateNotification()
+
+                try {
+                    val out = pipeline.process(item)
+                    queue.setAnswer(item.id, out.answer, MailQueue.DONE)
+                    notifyAnswered(item.subject)
+                    Log.i(TAG, "answered id=${item.id} in ${out.ms}ms")
+                } catch (e: Exception) {
+                    Log.e(TAG, "pipeline failed id=${item.id}", e)
+                    queue.setAnswer(item.id, "処理に失敗しました: ${e.message}",
+                        MailQueue.ERROR)
+                }
+                pipelineStatus = "待機"
+                updateNotification()
+            }
+            pipelineStatus = "停止"
+            Log.i(TAG, "pipeline stopped")
+        }
+    }
+
+    private fun stopPipeline() {
+        pipelineThread?.interrupt()
+        pipelineThread = null
+        pipelineStatus = "停止"
+    }
+
+    /** 回答ができたことを知らせる（常駐通知とは別枠） */
+    private fun notifyAnswered(subject: String) {
+        try {
+            val nm = getSystemService(NotificationManager::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                nm.createNotificationChannel(NotificationChannel(
+                    ANSWER_CHANNEL_ID, "回答", NotificationManager.IMPORTANCE_DEFAULT))
+            }
+            val tap = PendingIntent.getActivity(
+                this, 1, Intent(this, MailActivity::class.java),
+                PendingIntent.FLAG_IMMUTABLE)
+            nm.notify(NOTIF_ANSWER_ID, Notification.Builder(this, ANSWER_CHANNEL_ID)
+                .setContentTitle("回答ができました")
+                .setContentText(subject.take(60))
+                .setSmallIcon(android.R.drawable.stat_notify_chat)
+                .setContentIntent(tap)
+                .setAutoCancel(true)
+                .build())
+        } catch (_: Exception) {}
     }
 
     /**
@@ -216,6 +303,7 @@ class ServerService : Service() {
         }
         if (prefs.getBoolean(K_MAIL, false)) {
             lines.add("メール: ${watcher?.status ?: "起動中"}")
+            lines.add("推論: $pipelineStatus")
         }
 
         val tap = PendingIntent.getActivity(

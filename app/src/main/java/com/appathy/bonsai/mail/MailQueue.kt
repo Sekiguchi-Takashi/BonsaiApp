@@ -109,6 +109,16 @@ class MailQueue(ctx: Context) : SQLiteOpenHelper(ctx, "mail.db", null, 1) {
         return Triple(n(PENDING), n(DONE), n(ERROR))
     }
 
+    /** 失敗した項目を未処理に戻す */
+    fun retryErrors(): Int {
+        val db = writableDatabase
+        val n = db.rawQuery("SELECT COUNT(*) FROM mails WHERE status=?",
+            arrayOf(ERROR)).use { if (it.moveToFirst()) it.getInt(0) else 0 }
+        db.execSQL("UPDATE mails SET status=?, answer=NULL WHERE status=?",
+            arrayOf(PENDING, ERROR))
+        return n
+    }
+
     fun clearAll() {
         writableDatabase.execSQL("DELETE FROM mails")
     }

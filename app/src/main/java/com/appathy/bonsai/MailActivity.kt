@@ -107,6 +107,16 @@ class MailActivity : Activity() {
         }
 
         Button(this).apply {
+            text = "失敗した項目を再処理"
+            setOnClickListener {
+                val n = queue.retryErrors()
+                status.text = "${n}件を未処理に戻しました"
+                refresh()
+            }
+            root.addView(this, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+
+        Button(this).apply {
             text = "キューを全消去"
             setOnClickListener {
                 queue.clearAll(); refresh()
@@ -159,17 +169,27 @@ class MailActivity : Activity() {
         toggleBtn.text = if (on) "メール監視を停止" else "メール監視を開始"
 
         val (p, d, e) = queue.counts()
-        status.text = "${ServerService.mailStatus}  /  未処理 $p ・処理済 $d ・失敗 $e"
+        status.text = "受信: ${ServerService.mailStatus}\n" +
+                "推論: ${ServerService.pipelineStatus}\n" +
+                "未処理 $p ・処理済 $d ・失敗 $e"
 
         val items = queue.recent(20)
         list.text = if (items.isEmpty()) "（まだありません）"
         else buildString {
             for (m in items) {
-                append("[${m.status}] ${fmt.format(Date(m.receivedAt))}\n")
-                append("From: ${m.sender.take(60)}\n")
-                append("Sub : ${m.subject.take(60)}\n")
-                append(m.body.take(120).replace("\n", " "))
-                append("\n\n")
+                val mark = when (m.status) {
+                    MailQueue.DONE -> "✓"
+                    MailQueue.ERROR -> "×"
+                    else -> "…"
+                }
+                append("$mark ${fmt.format(Date(m.receivedAt))}  ${m.sender.take(40)}\n")
+                append("件名: ${m.subject.take(60)}\n")
+                if (m.answer != null) {
+                    append("\n【回答】\n").append(m.answer)
+                } else {
+                    append("本文: ").append(m.body.take(100).replace("\n", " "))
+                }
+                append("\n────────────\n\n")
             }
         }
     }
