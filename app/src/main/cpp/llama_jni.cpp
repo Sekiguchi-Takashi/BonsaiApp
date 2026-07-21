@@ -1,5 +1,9 @@
 // llama_jni.cpp v0.3
 //
+// v1.2 の変更:
+//   - プロンプトを n_batch 単位に分割してプリフィルする（RAGで落ちる問題の修正）
+//   - n_ctx を超えるプロンプトを安全に切り詰める
+//
 // v0.6 の変更:
 //   - messages[] 配列に対応（OpenAI互換サーバー用のマルチターン）
 //   - サンプラをリクエスト単位で構築（temperature 等をAPI経由で指定可能に）
@@ -29,6 +33,7 @@
 #include <cmath>
 #include <set>
 #include <cstdint>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -44,6 +49,7 @@ struct Session {
     llama_model   * model = nullptr;
     llama_context * ctx   = nullptr;
     int n_vocab = 0;
+    int n_batch = 256;   // llama_decode に一度に渡せる上限
     std::vector<llama_logit_bias> biases;   // sampler より長生きさせる
     std::atomic<bool> stop{false};
 };
@@ -249,6 +255,7 @@ Java_com_appathy_bonsai_LlamaBridge_nativeLoad(
         LOGI("banned %zu / %d tokens (simplified chinese)", s->biases.size(), n_vocab);
     }
     s->n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(model));
+    s->n_batch = (int) cparams.n_batch;
 
     LOGI("loaded, n_ctx=%d threads=%d kv=q8_0 mmap=on", nCtx, nThreads);
     return reinterpret_cast<jlong>(s);
@@ -298,7 +305,8 @@ Java_com_appathy_bonsai_LlamaBridge_nativeGenerate(
     llama_tokenize(vocab, formatted.c_str(), (int32_t) formatted.size(),
                    tokens.data(), n_needed, false, true);
 
-    LOGI("messages=%d prompt_tokens=%d temp=%.2f", (int) n_msg, n_needed, (double) temp);
+    LOGI("messages=%d prompt_tokens=%d n_ctx=%d temp=%.2f",
+         (int) n_msg, n_needed, (int) llama_n_ctx(s->ctx), (double) temp);
 
     // ---- サンプラをリクエスト単位で構築 ----
     llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
@@ -321,8 +329,36 @@ Java_com_appathy_bonsai_LlamaBridge_nativeGenerate(
     jmethodID onTok = env->GetMethodID(cbClass, "onToken", "([B)V");
     std::string pending;   // 未完成のUTF-8シーケンスを溜めておく
 
-    llama_batch batch = llama_batch_get_one(tokens.data(), (int32_t) tokens.size());
+    // ---- プロンプトが長すぎる場合は末尾を優先して切り詰める ----
+    const int n_ctx_cur = (int) llama_n_ctx(s->ctx);
+    const int max_prompt = n_ctx_cur - maxTokens - 8;
+    if (max_prompt > 0 && (int) tokens.size() > max_prompt) {
+        LOGE("prompt %d tokens > budget %d, truncating head",
+             (int) tokens.size(), max_prompt);
+        tokens.erase(tokens.begin(), tokens.end() - max_prompt);
+    }
+
+    // ---- プリフィル: n_batch を超えないよう分割して食わせる ----
+    // ここを1回で渡すと llama.cpp 側のアサートで abort する（RAG有効時に発生）
+    bool prefill_ok = true;
+    for (size_t off = 0; off < tokens.size(); off += (size_t) s->n_batch) {
+        if (s->stop.load()) { prefill_ok = false; break; }
+        const int n = (int) std::min((size_t) s->n_batch, tokens.size() - off);
+        llama_batch pb = llama_batch_get_one(tokens.data() + off, n);
+        if (llama_decode(s->ctx, pb) != 0) {
+            LOGE("prefill failed at offset %zu", off);
+            prefill_ok = false;
+            break;
+        }
+    }
+    if (!prefill_ok) {
+        llama_sampler_free(smpl);
+        return;
+    }
+
     llama_token cur = 0;   // batch が指す先の生存を保証する
+    llama_batch batch = llama_batch_get_one(&cur, 1);
+    bool first = true;
 
     for (int i = 0; i < maxTokens; i++) {
         if (s->stop.load()) {
@@ -330,10 +366,13 @@ Java_com_appathy_bonsai_LlamaBridge_nativeGenerate(
             break;
         }
 
-        if (llama_decode(s->ctx, batch) != 0) {
-            LOGE("llama_decode failed at %d", i);
-            break;
+        if (!first) {
+            if (llama_decode(s->ctx, batch) != 0) {
+                LOGE("llama_decode failed at %d", i);
+                break;
+            }
         }
+        first = false;
 
         llama_token id = llama_sampler_sample(smpl, s->ctx, -1);
         if (llama_vocab_is_eog(vocab, id)) break;

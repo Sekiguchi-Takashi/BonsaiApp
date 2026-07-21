@@ -27,10 +27,10 @@ class Pipeline(ctx: Context) {
          * n_ctx=2048 のうち、質問文とシステム指示と回答生成分を差し引いた残り。
          * 日本語はおよそ1文字1トークン前後なので、ここを上げすぎると溢れる。
          */
-        const val MAX_CONTEXT_CHARS = 1100
+        const val MAX_CONTEXT_CHARS = 900
 
         /** 質問として使うメール本文の最大文字数 */
-        const val MAX_QUESTION_CHARS = 600
+        const val MAX_QUESTION_CHARS = 500
 
         const val MAX_ANSWER_TOKENS = 400
 
