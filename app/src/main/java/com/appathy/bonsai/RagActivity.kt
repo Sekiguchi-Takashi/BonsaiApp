@@ -1,12 +1,8 @@
 package com.appathy.bonsai
 
 import android.app.Activity
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
 import android.graphics.Color
-import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -14,23 +10,27 @@ import android.text.InputType
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.*
-import com.appathy.bonsai.rag.OneDrive
+import com.appathy.bonsai.rag.FolderSync
 import com.appathy.bonsai.rag.RagDb
 import kotlin.concurrent.thread
 
 /**
- * RAG設定画面（フェーズ1）。
- * OneDrive のサインイン、差分同期、BM25検索の動作確認までをここで完結させる。
+ * RAG設定画面（v0.8）。
+ *
+ * クラウド認証はアプリに持たない。Termux の rclone が端末内フォルダへ同期し、
+ * ここではそのフォルダを選んでインデックスするだけ。
  */
 class RagActivity : Activity() {
 
+    companion object {
+        private const val REQ_TREE = 3001
+    }
+
     private val ui = Handler(Looper.getMainLooper())
     private lateinit var db: RagDb
-    private lateinit var drive: OneDrive
+    private lateinit var sync: FolderSync
 
-    private lateinit var clientInput: EditText
-    private lateinit var folderInput: EditText
-    private lateinit var signBtn: Button
+    private lateinit var folderView: TextView
     private lateinit var syncBtn: Button
     private lateinit var log: TextView
     private lateinit var queryInput: EditText
@@ -40,7 +40,7 @@ class RagActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         db = RagDb(this)
-        drive = OneDrive(this, db)
+        sync = FolderSync(this, db)
 
         val d = resources.displayMetrics.density
         val pad = (16 * d).toInt()
@@ -54,34 +54,28 @@ class RagActivity : Activity() {
             text = t
             setTextColor(Color.parseColor("#9AA0A6"))
             textSize = 12f
-            setPadding(0, (8 * d).toInt(), 0, 0)
+            setPadding(0, (10 * d).toInt(), 0, 0)
         }
 
-        fun field(hint: String, value: String) = EditText(this).apply {
-            this.hint = hint
-            setText(value)
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.parseColor("#5F6368"))
-            inputType = InputType.TYPE_CLASS_TEXT
+        root.addView(label("同期フォルダ（rclone の出力先を選ぶ）"))
+
+        folderView = TextView(this).apply {
+            setTextColor(Color.parseColor("#63BA80"))
             textSize = 14f
         }
+        root.addView(folderView)
 
-        root.addView(label("Azure アプリの クライアントID"))
-        clientInput = field("00000000-0000-0000-0000-000000000000", drive.clientId)
-        root.addView(clientInput, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-
-        root.addView(label("OneDrive 上のフォルダ"))
-        folderInput = field("/RAG", drive.folder)
-        root.addView(folderInput, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-
-        signBtn = Button(this).apply { setOnClickListener { toggleSignIn() } }
-        root.addView(signBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        Button(this).apply {
+            text = "フォルダを選択"
+            setOnClickListener { pickFolder() }
+            root.addView(this, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
 
         syncBtn = Button(this).apply {
-            text = "差分同期"
+            text = "インデックス更新"
             setOnClickListener { doSync() }
+            root.addView(this, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
-        root.addView(syncBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         Button(this).apply {
             text = "インデックス全消去"
@@ -102,7 +96,13 @@ class RagActivity : Activity() {
         root.addView(log)
 
         root.addView(label("検索テスト（BM25）"))
-        queryInput = field("キーワードを入力", "")
+        queryInput = EditText(this).apply {
+            hint = "キーワードを入力"
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.parseColor("#5F6368"))
+            inputType = InputType.TYPE_CLASS_TEXT
+            textSize = 14f
+        }
         root.addView(queryInput, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         Button(this).apply {
@@ -116,100 +116,61 @@ class RagActivity : Activity() {
             textSize = 13f
             setTextIsSelectable(true)
         }
-
-        val scroll = ScrollView(this).apply { addView(results) }
-        root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+        root.addView(results, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         setContentView(ScrollView(this).apply { addView(root) })
         refresh()
     }
 
     private fun refresh() {
-        signBtn.text = if (drive.isSignedIn) "サインアウト" else "サインイン"
-        syncBtn.isEnabled = drive.isSignedIn
+        folderView.text = sync.treeUri?.let { sync.folderLabel() } ?: "未選択"
+        syncBtn.isEnabled = sync.treeUri != null
         val s = db.stats()
         statsView.text = "文書 ${s.docs} / チャンク ${s.chunks} / 語彙 ${s.terms}"
     }
 
-    private fun save() {
-        drive.clientId = clientInput.text.toString()
-        drive.folder = folderInput.text.toString()
+    // ------------------------------------------------------------ フォルダ
+
+    private fun pickFolder() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                     Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        startActivityForResult(i, REQ_TREE)
     }
 
-    // ---------------------------------------------------------- サインイン
-
-    private fun toggleSignIn() {
-        if (drive.isSignedIn) {
-            drive.signOut()
-            log.text = "サインアウトしました"
-            refresh()
-            return
-        }
-        save()
-        if (drive.clientId.isEmpty()) {
-            log.text = "クライアントIDを入力してください"
-            return
-        }
-
-        signBtn.isEnabled = false
-        log.text = "デバイスコードを取得中…"
-
-        thread {
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_TREE || resultCode != RESULT_OK) return
+        data?.data?.let {
             try {
-                val dc = drive.startDeviceCode()
-                ui.post {
-                    log.text = "コード: ${dc.userCode}\n" +
-                            "${dc.verificationUri} を開いて入力してください\n" +
-                            "（コードはクリップボードにコピー済み）"
-                    copy(dc.userCode)
-                    try {
-                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(dc.verificationUri)))
-                    } catch (_: Exception) {}
-                }
-                drive.pollForToken(dc) { sec ->
-                    ui.post { log.append("\n承認待ち… ${sec}秒") }
-                }
-                ui.post {
-                    log.text = "サインインしました"
-                    signBtn.isEnabled = true
-                    refresh()
-                }
+                sync.persist(it)
+                log.text = "フォルダを設定しました"
             } catch (e: Exception) {
-                ui.post {
-                    log.text = "サインイン失敗: ${e.message}"
-                    signBtn.isEnabled = true
-                }
+                log.text = "設定失敗: ${e.message}"
             }
+            refresh()
         }
     }
 
-    private fun copy(text: String) {
-        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(ClipData.newPlainText("code", text))
-    }
-
-    // -------------------------------------------------------------- 同期
+    // ------------------------------------------------------------ 同期
 
     private fun doSync() {
-        save()
         syncBtn.isEnabled = false
-        log.text = "同期を開始します…"
-
+        log.text = "開始します…"
         thread {
             try {
-                val r = drive.sync { msg -> ui.post { log.text = msg } }
+                val r = sync.sync { msg -> ui.post { log.text = msg } }
                 ui.post {
-                    log.text = buildString {
-                        append(if (r.fullSync) "初回同期 完了\n" else "差分同期 完了\n")
-                        append("追加 ${r.added} / 更新 ${r.updated} / 削除 ${r.deleted}")
-                        if (r.skipped > 0) append(" / 対象外 ${r.skipped}")
-                    }
+                    log.text = "完了\n追加 ${r.added} / 更新 ${r.updated} / " +
+                            "削除 ${r.deleted} / 変更なし ${r.unchanged}" +
+                            if (r.skipped > 0) " / 対象外 ${r.skipped}" else ""
                     syncBtn.isEnabled = true
                     refresh()
                 }
             } catch (e: Exception) {
                 ui.post {
-                    log.text = "同期失敗: ${e.message}"
+                    log.text = "失敗: ${e.message}"
                     syncBtn.isEnabled = true
                 }
             }
@@ -222,11 +183,11 @@ class RagActivity : Activity() {
             log.text = "インデックスを消去しました"
             refresh()
         } else {
-            log.text = "もう一度押すと全消去します（次回は初回同期になります）"
+            log.text = "もう一度押すと全消去します"
         }
     }
 
-    // -------------------------------------------------------------- 検索
+    // ------------------------------------------------------------ 検索
 
     private fun doSearch() {
         val q = queryInput.text.toString()

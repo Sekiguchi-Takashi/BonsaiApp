@@ -241,6 +241,15 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 1) {
             }
     }
 
+    /** インデックス済みの item_id 一覧（削除検出に使う） */
+    fun allDocIds(): List<String> {
+        val out = ArrayList<String>()
+        readableDatabase.rawQuery("SELECT item_id FROM docs", null).use {
+            while (it.moveToNext()) out.add(it.getString(0))
+        }
+        return out
+    }
+
     // --------------------------------------------------------------- stats
 
     data class Stats(val docs: Long, val chunks: Long, val terms: Long)
@@ -262,6 +271,6 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 1) {
         db.execSQL("DELETE FROM postings")
         db.execSQL("DELETE FROM chunks")
         db.execSQL("DELETE FROM docs")
-        db.delete("meta", "k=?", arrayOf(OneDrive.KEY_DELTA))
+        db.delete("meta", "k LIKE 'stamp:%'", null)
     }
 }
