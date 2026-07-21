@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- ServerSocket のバインドと OneDrive 同期に必要 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:label="Bonsai"
@@ -31,13 +31,28 @@
             android:label="RAG設定"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
+        <activity
+            android:name=".MailActivity"
+            android:exported="false"
+            android:label="メール連携"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
         <service
             android:name=".ServerService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="ローカルLLM推論サーバーの常駐" />
+                android:value="ローカルLLM推論サーバーとメール監視の常駐" />
         </service>
+
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

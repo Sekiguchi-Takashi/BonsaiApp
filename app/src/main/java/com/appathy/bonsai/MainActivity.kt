@@ -31,6 +31,9 @@ import kotlin.concurrent.thread
 class MainActivity : Activity() {
 
     companion object {
+        /** サービスがモデル解放の可否を判断するために参照する */
+        @Volatile var isForeground = false
+
         private const val REQ_PICK = 1001
         private const val N_CTX = 2048   // RAG の文脈を積むため v0.7 で 2048 に戻した
         private const val MAX_TOKENS = 512
@@ -51,6 +54,7 @@ class MainActivity : Activity() {
     private lateinit var pickBtn: Button
     private lateinit var serverBtn: Button
     private lateinit var ragBtn: Button
+    private lateinit var mailBtn: Button
     private lateinit var serverInfo: TextView
     private lateinit var input: EditText
     private lateinit var output: TextView
@@ -95,6 +99,12 @@ class MainActivity : Activity() {
             setOnClickListener { startActivity(Intent(this@MainActivity, RagActivity::class.java)) }
         }
         root.addView(ragBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        mailBtn = Button(this).apply {
+            text = "メール連携 (Gmail)"
+            setOnClickListener { startActivity(Intent(this@MainActivity, MailActivity::class.java)) }
+        }
+        root.addView(mailBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         serverInfo = TextView(this).apply {
             setTextColor(Color.parseColor("#63BA80"))
@@ -235,22 +245,22 @@ class MainActivity : Activity() {
     // ---------- OpenAI互換サーバー ----------
 
     private fun toggleServer() {
-        if (ServerService.isRunning) {
-            ServerService.stop(this)
+        if (ServerService.serverWanted(this)) {
+            ServerService.stopServer(this)
         } else {
             if (Build.VERSION.SDK_INT >= 33 &&
                 checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
                     != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2001)
             }
-            ServerService.start(this, SERVER_PORT, BIND_ALL)
+            ServerService.startServer(this, SERVER_PORT, BIND_ALL)
         }
         // サービス起動は非同期なので少し待ってから反映
         ui.postDelayed({ refreshServerInfo() }, 400)
     }
 
     private fun refreshServerInfo() {
-        val on = ServerService.isRunning
+        val on = ServerService.serverWanted(this)
         serverBtn.text = if (on) "サーバー停止" else "サーバー起動"
         serverInfo.text = if (on)
             "http://127.0.0.1:$SERVER_PORT/v1\nOpenAI互換 / api_key は任意の文字列で可"
@@ -259,7 +269,13 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        isForeground = true
         if (::serverBtn.isInitialized) refreshServerInfo()
+    }
+
+    override fun onPause() {
+        isForeground = false
+        super.onPause()
     }
 
     private fun threadCount() =
@@ -338,7 +354,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         llama.stop()
         // サーバー稼働中は他アプリが使うのでモデルを解放しない
-        if (!ServerService.isRunning) llama.free()
+        if (!ServerService.serverWanted(this) && !ServerService.mailWanted(this)) llama.free()
         super.onDestroy()
     }
 }

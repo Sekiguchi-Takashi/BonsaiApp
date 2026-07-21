@@ -41,4 +41,11 @@ object Engine {
     }
 
     fun stop() = bridge.stop()
+
+    /** 誰も使っていなければモデルを解放してRAMを返す */
+    fun releaseIfIdle() {
+        synchronized(lock) {
+            if (!busy) bridge.free()
+        }
+    }
 }
