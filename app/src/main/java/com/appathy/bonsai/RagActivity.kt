@@ -126,7 +126,10 @@ class RagActivity : Activity() {
         folderView.text = sync.treeUri?.let { sync.folderLabel() } ?: "未選択"
         syncBtn.isEnabled = sync.treeUri != null
         val s = db.stats()
-        statsView.text = "文書 ${s.docs} / チャンク ${s.chunks} / 語彙 ${s.terms}"
+        val types = db.typeCounts()
+        val typeStr = if (types.isEmpty()) ""
+            else "\n" + types.entries.joinToString("  ") { "${it.key}:${it.value}" }
+        statsView.text = "文書 ${s.docs} / チャンク ${s.chunks} / 語彙 ${s.terms}$typeStr"
     }
 
     // ------------------------------------------------------------ フォルダ

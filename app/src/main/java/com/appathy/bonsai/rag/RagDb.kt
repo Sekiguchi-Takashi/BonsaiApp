@@ -14,7 +14,7 @@ import android.database.sqlite.SQLiteOpenHelper
  *
  * 埋め込みモデルを常駐させないので、追加のRAM消費はほぼゼロ。
  */
-class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 1) {
+class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
 
     companion object {
         private const val K1 = 1.2
@@ -32,7 +32,9 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 1) {
                 item_id  TEXT UNIQUE,
                 path     TEXT,
                 name     TEXT,
-                mtime    TEXT
+                mtime    TEXT,
+                doc_type TEXT,
+                title    TEXT
             )""")
         db.execSQL("""
             CREATE TABLE chunks(
@@ -89,12 +91,21 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 1) {
         try {
             deleteDocInternal(db, itemId)
 
+            // frontmatter を分離してメタデータを取り出す
+            val (meta, bodyText) = Frontmatter.split(text)
+
             val docId = db.insert("docs", null, ContentValues().apply {
                 put("item_id", itemId); put("path", path)
                 put("name", name); put("mtime", mtime)
+                put("doc_type", meta["type"] ?: "")
+                put("title", meta["app_name"] ?: meta["character_name"] ?: "")
             })
 
-            for ((ord, chunk) in chunk(text).withIndex()) {
+            // frontmatter の値も検索対象に含める（type名やキャラ名で引けるように）
+            val searchable = if (meta.isEmpty()) bodyText
+                else meta.values.joinToString(" ") + "\n" + bodyText
+
+            for ((ord, chunk) in chunk(searchable).withIndex()) {
                 val tf = Tokenizer.termFreq(chunk)
                 if (tf.isEmpty()) continue
                 val len = tf.values.sum()
@@ -185,10 +196,15 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 1) {
         val score: Double,
         val text: String,
         val path: String,
-        val name: String
+        val name: String,
+        val docType: String
     )
 
-    fun search(query: String, limit: Int = 3): List<Hit> {
+    /**
+     * @param typeFilter 空なら全件。"app_doc" / "character" を指定すると
+     *        その種別の資料だけを検索対象にする（将来のキャラ絞り込み用）。
+     */
+    fun search(query: String, limit: Int = 3, typeFilter: String = ""): List<Hit> {
         val db = readableDatabase
 
         val total = db.rawQuery("SELECT COUNT(*), AVG(len) FROM chunks", null).use {
@@ -231,14 +247,18 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 1) {
             .take(limit)
             .mapNotNull { (cid, score) ->
                 db.rawQuery("""
-                    SELECT c.text, d.path, d.name
+                    SELECT c.text, d.path, d.name, IFNULL(d.doc_type,'')
                     FROM chunks c JOIN docs d ON d.id = c.doc_id
                     WHERE c.id = ?""", arrayOf(cid.toString())).use {
-                    if (it.moveToFirst())
-                        Hit(cid, score, it.getString(0), it.getString(1), it.getString(2))
-                    else null
+                    if (it.moveToFirst()) {
+                        val dtype = it.getString(3)
+                        if (typeFilter.isNotEmpty() && dtype != typeFilter) null
+                        else Hit(cid, score, it.getString(0),
+                                 it.getString(1), it.getString(2), dtype)
+                    } else null
                 }
             }
+            .filterNotNull()
     }
 
     /** インデックス済みの item_id 一覧（削除検出に使う） */
@@ -264,6 +284,17 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 1) {
             count("SELECT COUNT(*) FROM chunks"),
             count("SELECT COUNT(DISTINCT term) FROM postings")
         )
+    }
+
+    /** 種別ごとの文書数。RAG設定画面に出す */
+    fun typeCounts(): Map<String, Int> {
+        val out = LinkedHashMap<String, Int>()
+        readableDatabase.rawQuery(
+            "SELECT IFNULL(NULLIF(doc_type,''),'(なし)') t, COUNT(*) " +
+            "FROM docs GROUP BY t ORDER BY t", null).use {
+            while (it.moveToNext()) out[it.getString(0)] = it.getInt(1)
+        }
+        return out
     }
 
     fun clearAll() {
