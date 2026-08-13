@@ -52,20 +52,18 @@ class MailQueue(ctx: Context) : SQLiteOpenHelper(ctx, "mail.db", null, 1) {
 
     /** 既に取り込み済みなら false */
     fun enqueue(uid: Long, mail: MimeParser.Mail): Boolean {
-        val db = writableDatabase
-        val exists = db.rawQuery("SELECT 1 FROM mails WHERE uid=?",
-            arrayOf(uid.toString())).use { it.moveToFirst() }
-        if (exists) return false
-
-        db.insert("mails", null, ContentValues().apply {
-            put("uid", uid)
-            put("sender", mail.from)
-            put("subject", mail.subject)
-            put("body", mail.body.take(20000))
-            put("received_at", System.currentTimeMillis())
-            put("status", PENDING)
-        })
-        return true
+        // v1.4: check-then-insert には競合の穴があり、UNIQUE 衝突で insert が
+        // 失敗しても true を返していた。CONFLICT_IGNORE で原子的に判定する。
+        val rowId = writableDatabase.insertWithOnConflict("mails", null,
+            ContentValues().apply {
+                put("uid", uid)
+                put("sender", mail.from)
+                put("subject", mail.subject)
+                put("body", mail.body.take(20000))
+                put("received_at", System.currentTimeMillis())
+                put("status", PENDING)
+            }, SQLiteDatabase.CONFLICT_IGNORE)
+        return rowId != -1L
     }
 
     fun recent(limit: Int = 30): List<Item> {

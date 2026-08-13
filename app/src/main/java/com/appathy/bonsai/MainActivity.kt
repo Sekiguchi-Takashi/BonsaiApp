@@ -10,6 +10,7 @@ import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
@@ -56,6 +57,7 @@ class MainActivity : Activity() {
     private lateinit var serverBtn: Button
     private lateinit var ragBtn: Button
     private lateinit var mailBtn: Button
+    private lateinit var editorBtn: Button
     private lateinit var ragToggle: Button
     private var useRag = true
     private val pipeline by lazy { Pipeline(applicationContext) }
@@ -103,6 +105,12 @@ class MainActivity : Activity() {
             setOnClickListener { startActivity(Intent(this@MainActivity, RagActivity::class.java)) }
         }
         root.addView(ragBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        editorBtn = Button(this).apply {
+            text = "資料エディタ"
+            setOnClickListener { startActivity(Intent(this@MainActivity, EditorActivity::class.java)) }
+        }
+        root.addView(editorBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         mailBtn = Button(this).apply {
             text = "メール連携 (Gmail)"
@@ -185,6 +193,24 @@ class MainActivity : Activity() {
     private fun importModel(uri: Uri) {
         pickBtn.isEnabled = false
         runBtn.isEnabled = false
+
+        // v1.4: コピー前に空き容量を確認する。従来はコピー途中で
+        // 容量切れになり、進捗表示のまま失敗していた。
+        val size = try {
+            contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val i = c.getColumnIndex(OpenableColumns.SIZE)
+                if (i >= 0 && c.moveToFirst()) c.getLong(i) else -1L
+            } ?: -1L
+        } catch (e: Exception) { -1L }
+
+        if (size > 0 && filesDir.usableSpace < size + 64L * 1024 * 1024) {
+            status.text = "空き容量不足: %d MB 必要（現在の空き %d MB）"
+                .format(size / 1024 / 1024 + 64, filesDir.usableSpace / 1024 / 1024)
+            pickBtn.isEnabled = true
+            runBtn.isEnabled = llama.isLoaded
+            return
+        }
+
         llama.free()
 
         thread {

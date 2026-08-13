@@ -32,6 +32,13 @@
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
         <activity
+            android:name=".EditorActivity"
+            android:exported="false"
+            android:label="資料エディタ"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <activity
             android:name=".MailActivity"
             android:exported="false"
             android:label="メール連携"

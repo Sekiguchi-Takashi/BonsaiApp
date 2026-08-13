@@ -215,6 +215,15 @@ class LlamaServer(
             seed        = req.optInt("seed", -1)
         )
 
+        // v1.4: 推論は直列なので、実行中に来た2本目は待たせずに 503 を返す。
+        // 従来は synchronized で黙って待たされ、soTimeout の30秒で
+        // 接続ごと切られていた（呼び出し側からは原因不明の失敗に見える）。
+        // チェックと実行の間に隙はあるが、その場合は従来どおり待つだけで害はない。
+        if (Engine.busy) {
+            sendJson(out, 503, errorObj("engine busy, retry later", "server_error"))
+            return
+        }
+
         val id = "chatcmpl-" + System.nanoTime().toString(16)
         val created = System.currentTimeMillis() / 1000
 
@@ -345,6 +354,7 @@ class LlamaServer(
         sb.append("Access-Control-Allow-Origin: *\r\n")
         sb.append("Access-Control-Allow-Headers: *\r\n")
         if (length >= 0) sb.append("Content-Length: $length\r\n")
+        if (!extra.contains("Connection:")) sb.append("Connection: close\r\n")
         sb.append(extra)
         sb.append("\r\n")
         out.write(sb.toString().toByteArray(Charsets.UTF_8))

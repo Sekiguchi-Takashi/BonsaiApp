@@ -217,34 +217,38 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
         val terms = Tokenizer.tokenize(query).distinct().take(64)
         if (terms.isEmpty()) return emptyList()
 
-        val scores = HashMap<Long, Double>()
-
-        for (term in terms) {
-            val df = db.rawQuery(
-                "SELECT COUNT(*) FROM postings WHERE term=?", arrayOf(term)
-            ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
-            if (df == 0L) continue
-
-            // BM25 の IDF。df が大きい語（助詞相当）は自然に効かなくなる
-            val idf = Math.log(1.0 + (n - df + 0.5) / (df + 0.5))
-
-            db.rawQuery("""
-                SELECT p.chunk_id, p.tf, c.len
-                FROM postings p JOIN chunks c ON c.id = p.chunk_id
-                WHERE p.term = ?""", arrayOf(term)).use { cur ->
-                while (cur.moveToNext()) {
-                    val cid = cur.getLong(0)
-                    val tf = cur.getDouble(1)
-                    val dl = cur.getDouble(2)
-                    val denom = tf + K1 * (1 - B + B * dl / avgdl)
-                    scores[cid] = (scores[cid] ?: 0.0) + idf * (tf * (K1 + 1)) / denom
-                }
+        // v1.4: 語ごとに2クエリ（計2N回）投げていたのを1回の IN 句に統合。
+        // 日本語bigramはクエリが30語を超えることもあり、SQLiteの往復回数が
+        // そのまま検索時間に効いていた。
+        data class Row(val term: String, val cid: Long, val tf: Double, val dl: Double)
+        val rows = ArrayList<Row>()
+        val placeholders = terms.joinToString(",") { "?" }
+        db.rawQuery("""
+            SELECT p.term, p.chunk_id, p.tf, c.len
+            FROM postings p JOIN chunks c ON c.id = p.chunk_id
+            WHERE p.term IN ($placeholders)""", terms.toTypedArray()).use { cur ->
+            while (cur.moveToNext()) {
+                rows.add(Row(cur.getString(0), cur.getLong(1),
+                             cur.getDouble(2), cur.getDouble(3)))
             }
         }
 
+        // posting は (term, chunk) につき1行なので、語ごとの行数がそのまま df
+        val dfMap = HashMap<String, Int>()
+        for (r in rows) dfMap[r.term] = (dfMap[r.term] ?: 0) + 1
+
+        val scores = HashMap<Long, Double>()
+        for (r in rows) {
+            val df = dfMap[r.term] ?: continue
+            val idf = Math.log(1.0 + (n - df + 0.5) / (df + 0.5))
+            val denom = r.tf + K1 * (1 - B + B * r.dl / avgdl)
+            scores[r.cid] = (scores[r.cid] ?: 0.0) + idf * (r.tf * (K1 + 1)) / denom
+        }
+
+        // v1.4: typeFilter を take(limit) の前に適用する。従来は上位limit件を
+        // 取ってから種別で弾いていたため、絞り込み時に件数が欠けるバグがあった。
         return scores.entries
             .sortedByDescending { it.value }
-            .take(limit)
             .mapNotNull { (cid, score) ->
                 db.rawQuery("""
                     SELECT c.text, d.path, d.name, IFNULL(d.doc_type,'')
@@ -258,7 +262,7 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
                     } else null
                 }
             }
-            .filterNotNull()
+            .take(limit)
     }
 
     /** インデックス済みの item_id 一覧（削除検出に使う） */

@@ -36,10 +36,12 @@ class FolderSync(private val ctx: Context, private val db: RagDb) {
             if (v == null) remove(K_TREE) else putString(K_TREE, v.toString())
         }.apply()
 
-    /** SAFで選んだフォルダの永続アクセス権を確保する */
+    /** SAFで選んだフォルダの永続アクセス権を確保する（v1.5から読み書き両方） */
     fun persist(uri: Uri) {
         cr.takePersistableUriPermission(
-            uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            uri,
+            android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+            android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         treeUri = uri
     }
 
@@ -105,6 +107,48 @@ class FolderSync(private val ctx: Context, private val db: RagDb) {
 
         Log.i(TAG, "sync +$added ~$updated -$deleted =$unchanged skip=$skipped")
         return Result(added, updated, deleted, unchanged, skipped)
+    }
+
+    // ---------------------------------------------------- エディタ用API (v1.5)
+
+    data class FileEntry(val docId: String, val name: String)
+
+    /** フォルダ内の .txt/.md 一覧（サブフォルダ含む、名前順） */
+    fun listTextFiles(): List<FileEntry> {
+        val tree = treeUri ?: return emptyList()
+        val all = ArrayList<Entry>()
+        walk(tree, DocumentsContract.getTreeDocumentId(tree), all, 0)
+        return all
+            .filter { it.name.substringAfterLast('.', "").lowercase() in TEXT_EXT }
+            .sortedBy { it.name }
+            .map { FileEntry(it.docId, it.name) }
+    }
+
+    fun readFile(docId: String): String {
+        val tree = treeUri ?: throw IllegalStateException("フォルダ未選択")
+        return readText(tree, docId)
+    }
+
+    /**
+     * 同名ファイルがあれば上書き、無ければフォルダ直下に新規作成する。
+     * 書き込み権限が無い（v1.4以前に選んだフォルダ）場合は SecurityException になる。
+     */
+    fun writeFile(name: String, content: String) {
+        val tree = treeUri ?: throw IllegalStateException("フォルダ未選択")
+        val existing = listTextFiles().firstOrNull { it.name == name }
+        val uri = if (existing != null) {
+            DocumentsContract.buildDocumentUriUsingTree(tree, existing.docId)
+        } else {
+            DocumentsContract.createDocument(
+                cr,
+                DocumentsContract.buildDocumentUriUsingTree(
+                    tree, DocumentsContract.getTreeDocumentId(tree)),
+                "text/markdown", name)
+                ?: throw IllegalStateException("ファイル作成に失敗しました")
+        }
+        cr.openOutputStream(uri, "wt")!!.use {
+            it.write(content.toByteArray(Charsets.UTF_8))
+        }
     }
 
     private fun walk(tree: Uri, parentId: String, out: MutableList<Entry>, depth: Int) {

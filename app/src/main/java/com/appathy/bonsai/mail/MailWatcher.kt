@@ -140,19 +140,9 @@ class MailWatcher(private val ctx: Context, private val queue: MailQueue) {
         }
     }
 
-    /** 手動での1回取得（設定画面のテスト用） */
-    fun fetchOnce(): Int {
-        client.connect(user, appPassword)
-        try {
-            client.selectInbox()
-            var n = 0
-            drain { }
-            queue.counts().let { n = it.first }
-            return n
-        } finally {
-            client.close()
-        }
-    }
+    // v1.4: fetchOnce() を削除した。監視スレッドと同一の ImapClient を
+    // 共有しており、稼働中に呼ぶとソケット競合を起こす設計バグだった。
+    // UIからも未使用だったため、修正ではなく撤去とした。
 
     fun resetCursor() { lastUid = 0 }
 }
