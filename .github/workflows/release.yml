@@ -49,6 +49,10 @@ jobs:
           $GR assembleRelease || $GR assembleDebug
       - name: Collect, align and sign APKs
         run: |
+          if [ ! -f ci/appathy.keystore ]; then
+            echo "ci/appathy.keystore がありません。rollout.sh を実行してください。"
+            exit 1
+          fi
           mkdir -p out
           TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           for f in $(find . -path ./out -prune -o -name '*.apk' -path '*/outputs/apk/*' -print); do
@@ -60,7 +64,7 @@ jobs:
             o="out/${m}-${GITHUB_REF_NAME:-manual}.apk"
             "$TOOLS/zipalign" -f 4 "$f" "$o"
             "$TOOLS/apksigner" sign --ks ci/appathy.keystore --ks-pass pass:appathy-store --ks-key-alias appathy "$o"
-            "$TOOLS/apksigner" verify --print-certs "$o" | head -2
+            "$TOOLS/apksigner" verify --verbose "$o"
           done
           ls -la out/
       - uses: softprops/action-gh-release@v2
