@@ -43,26 +43,24 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
-      - name: Build
+      - name: Build all modules
         run: |
-          if [ -f gradlew ]; then
-            chmod +x gradlew
-            ./gradlew assembleDebug
-          else
-            gradle assembleDebug
-          fi
-      - name: Collect and re-sign APKs
+          if [ -f gradlew ]; then chmod +x gradlew; GR="./gradlew"; else GR="gradle"; fi
+          $GR assembleRelease || $GR assembleDebug
+      - name: Collect, align and sign APKs
         run: |
           mkdir -p out
           TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           for f in $(find . -path ./out -prune -o -name '*.apk' -path '*/outputs/apk/*' -print); do
+            case "$f" in
+              */apk/debug/*) if find . -path '*/outputs/apk/release/*.apk' | grep -q .; then continue; fi ;;
+            esac
             d=${f%%/build/outputs/*}
             m=$(basename "$d")
             o="out/${m}-${GITHUB_REF_NAME:-manual}.apk"
-            cp "$f" "$o"
-            if [ -f ci/appathy.keystore ]; then
-              "$TOOLS/apksigner" sign --ks ci/appathy.keystore --ks-pass pass:appathy-store --ks-key-alias appathy "$o"
-            fi
+            "$TOOLS/zipalign" -f 4 "$f" "$o"
+            "$TOOLS/apksigner" sign --ks ci/appathy.keystore --ks-pass pass:appathy-store --ks-key-alias appathy "$o"
+            "$TOOLS/apksigner" verify --print-certs "$o" | head -2
           done
           ls -la out/
       - uses: softprops/action-gh-release@v2
