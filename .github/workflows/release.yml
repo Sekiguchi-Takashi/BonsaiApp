@@ -65,8 +65,11 @@ jobs:
             "$TOOLS/zipalign" -f 4 "$f" "$o"
             "$TOOLS/apksigner" sign --ks ci/appathy.keystore --ks-pass pass:appathy-store --ks-key-alias appathy "$o"
             "$TOOLS/apksigner" verify --verbose "$o"
+            sha=$(sha256sum "$o" | cut -d " " -f 1)
+            printf "sha256=%s
+" "$sha" > "${o%.apk}.meta"
           done
           ls -la out/
       - uses: softprops/action-gh-release@v2
         with:
-          files: out/*.apk
+          files: out/*
