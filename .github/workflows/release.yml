@@ -66,10 +66,14 @@ jobs:
             "$TOOLS/apksigner" sign --ks ci/appathy.keystore --ks-pass pass:appathy-store --ks-key-alias appathy "$o"
             "$TOOLS/apksigner" verify --verbose "$o"
             sha=$(sha256sum "$o" | cut -d " " -f 1)
-            printf "sha256=%s
-" "$sha" > "${o%.apk}.meta"
+            printf "sha256 %s %s\n" "$(basename "$o")" "$sha" >> out/NOTES.txt
           done
           ls -la out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: out/*.apk
       - uses: softprops/action-gh-release@v2
         with:
-          files: out/*
+          files: out/*.apk
+          body_path: out/NOTES.txt
