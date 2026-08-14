@@ -15,8 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Fetch llama.cpp
+        run: |
+          if [ ! -d app/src/main/cpp/llama.cpp/.git ]; then
+            rm -rf app/src/main/cpp/llama.cpp
+            git clone --depth 1 https://github.com/ggml-org/llama.cpp app/src/main/cpp/llama.cpp
+          fi
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
