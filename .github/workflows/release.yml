@@ -69,10 +69,6 @@ jobs:
             printf "sha256 %s %s\n" "$(basename "$o")" "$sha" >> out/NOTES.txt
           done
           ls -la out/
-      - uses: actions/upload-artifact@v4
-        with:
-          name: apk
-          path: out/*.apk
       - uses: softprops/action-gh-release@v2
         with:
           files: out/*.apk
