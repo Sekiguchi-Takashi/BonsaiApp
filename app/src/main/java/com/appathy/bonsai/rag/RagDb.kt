@@ -21,8 +21,8 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
         private const val B = 0.75
 
         /** チャンク長。n_ctx=2048 に3件詰めても収まるサイズにしてある */
-        const val CHUNK_CHARS = 500
-        const val CHUNK_OVERLAP = 100
+        const val CHUNK_CHARS = 700   // v1.6: 40本規模では1機能の説明が分断されやすいため拡大
+        const val CHUNK_OVERLAP = 120
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -101,11 +101,19 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
                 put("title", meta["app_name"] ?: meta["character_name"] ?: "")
             })
 
-            // frontmatter の値も検索対象に含める（type名やキャラ名で引けるように）
-            val searchable = if (meta.isEmpty()) bodyText
-                else meta.values.joinToString(" ") + "\n" + bodyText
+            // v1.6: 従来は frontmatter を本文の先頭に足すだけだったので、
+            // 2つ目以降のチャンクにアプリ名が入らず「IroGameのかくれんぼ」で
+            // 絞り込めなかった。全チャンクの先頭に主題名を付与する。
+            val subject = meta["app_name"] ?: meta["character_name"] ?: ""
+            val label = meta["app_label"] ?: meta["story"] ?: ""
+            val tag = listOf(subject, label).filter { it.isNotEmpty() }
+                .distinct().joinToString(" ")
 
-            for ((ord, chunk) in chunk(searchable).withIndex()) {
+            val chunks = chunk(bodyText).map {
+                if (tag.isEmpty()) it else "$tag\n$it"
+            }
+
+            for ((ord, chunk) in chunks.withIndex()) {
                 val tf = Tokenizer.termFreq(chunk)
                 if (tf.isEmpty()) continue
                 val len = tf.values.sum()
@@ -197,14 +205,63 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
         val text: String,
         val path: String,
         val name: String,
-        val docType: String
+        val docType: String,
+        val docId: Long,
+        val title: String
     )
 
     /**
      * @param typeFilter 空なら全件。"app_doc" / "character" を指定すると
      *        その種別の資料だけを検索対象にする（将来のキャラ絞り込み用）。
      */
-    fun search(query: String, limit: Int = 3, typeFilter: String = ""): List<Hit> {
+    fun search(query: String, limit: Int = 4, typeFilter: String = ""): List<Hit> {
+        return searchInternal(query, limit, typeFilter, null)
+    }
+
+    /**
+     * 2段階検索（v1.6）。
+     *
+     * 40本規模になると「操作手順」「設定画面」のような共通語が全文書に現れ、
+     * BM25 の IDF がほぼ0になる。結果、固有名を含まないチャンクが
+     * 別アプリのものと区別できなくなり、上位が無関係な文書で埋まる。
+     *
+     * そこで、まず文書単位でスコアを集計して上位数件に絞り、
+     * その文書内のチャンクだけを対象に本検索を行う。
+     * 検索対象が1〜2アプリに限定されるため、共通語の希釈が起きない。
+     */
+    fun searchTwoStage(
+        query: String,
+        limit: Int = 4,
+        typeFilter: String = "",
+        docNarrow: Int = 3
+    ): List<Hit> {
+        // 第1段: 文書単位のスコアで候補を絞る
+        val docScores = HashMap<Long, Double>()
+        for (h in searchInternal(query, 60, typeFilter, null)) {
+            docScores[h.docId] = (docScores[h.docId] ?: 0.0) + h.score
+        }
+        if (docScores.isEmpty()) return emptyList()
+
+        val topDocs = docScores.entries
+            .sortedByDescending { it.value }
+            .take(docNarrow)
+            .map { it.key }
+            .toSet()
+
+        // 第2段: 絞った文書の中だけでチャンクを選ぶ
+        return searchInternal(query, limit, typeFilter, topDocs)
+    }
+
+    /**
+     * @param typeFilter 空なら全件。"app_doc" / "character" で種別を限定。
+     * @param docFilter  null なら全文書。指定時はその文書内のチャンクのみ対象。
+     */
+    private fun searchInternal(
+        query: String,
+        limit: Int,
+        typeFilter: String,
+        docFilter: Set<Long>?
+    ): List<Hit> {
         val db = readableDatabase
 
         val total = db.rawQuery("SELECT COUNT(*), AVG(len) FROM chunks", null).use {
@@ -217,9 +274,6 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
         val terms = Tokenizer.tokenize(query).distinct().take(64)
         if (terms.isEmpty()) return emptyList()
 
-        // v1.4: 語ごとに2クエリ（計2N回）投げていたのを1回の IN 句に統合。
-        // 日本語bigramはクエリが30語を超えることもあり、SQLiteの往復回数が
-        // そのまま検索時間に効いていた。
         data class Row(val term: String, val cid: Long, val tf: Double, val dl: Double)
         val rows = ArrayList<Row>()
         val placeholders = terms.joinToString(",") { "?" }
@@ -233,7 +287,6 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
             }
         }
 
-        // posting は (term, chunk) につき1行なので、語ごとの行数がそのまま df
         val dfMap = HashMap<String, Int>()
         for (r in rows) dfMap[r.term] = (dfMap[r.term] ?: 0) + 1
 
@@ -245,33 +298,27 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
             scores[r.cid] = (scores[r.cid] ?: 0.0) + idf * (r.tf * (K1 + 1)) / denom
         }
 
-        // v1.4: typeFilter を take(limit) の前に適用する。従来は上位limit件を
-        // 取ってから種別で弾いていたため、絞り込み時に件数が欠けるバグがあった。
         return scores.entries
             .sortedByDescending { it.value }
             .mapNotNull { (cid, score) ->
                 db.rawQuery("""
-                    SELECT c.text, d.path, d.name, IFNULL(d.doc_type,'')
+                    SELECT c.text, d.path, d.name, IFNULL(d.doc_type,''),
+                           d.id, IFNULL(d.title,'')
                     FROM chunks c JOIN docs d ON d.id = c.doc_id
                     WHERE c.id = ?""", arrayOf(cid.toString())).use {
                     if (it.moveToFirst()) {
                         val dtype = it.getString(3)
-                        if (typeFilter.isNotEmpty() && dtype != typeFilter) null
-                        else Hit(cid, score, it.getString(0),
-                                 it.getString(1), it.getString(2), dtype)
+                        val docId = it.getLong(4)
+                        when {
+                            typeFilter.isNotEmpty() && dtype != typeFilter -> null
+                            docFilter != null && docId !in docFilter -> null
+                            else -> Hit(cid, score, it.getString(0), it.getString(1),
+                                        it.getString(2), dtype, docId, it.getString(5))
+                        }
                     } else null
                 }
             }
             .take(limit)
-    }
-
-    /** インデックス済みの item_id 一覧（削除検出に使う） */
-    fun allDocIds(): List<String> {
-        val out = ArrayList<String>()
-        readableDatabase.rawQuery("SELECT item_id FROM docs", null).use {
-            while (it.moveToNext()) out.add(it.getString(0))
-        }
-        return out
     }
 
     // --------------------------------------------------------------- stats

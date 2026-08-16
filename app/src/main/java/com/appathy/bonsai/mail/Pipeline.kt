@@ -20,14 +20,14 @@ class Pipeline(ctx: Context) {
         private const val TAG = "Pipeline"
 
         /** 検索で拾うチャンク数 */
-        const val TOP_K = 3
+        const val TOP_K = 4   // v1.6: チャンク拡大に合わせて増やす
 
         /**
          * 参考資料に使う最大文字数。
          * n_ctx=2048 のうち、質問文とシステム指示と回答生成分を差し引いた残り。
          * 日本語はおよそ1文字1トークン前後なので、ここを上げすぎると溢れる。
          */
-        const val MAX_CONTEXT_CHARS = 900
+        const val MAX_CONTEXT_CHARS = 1000
 
         /** 質問として使うメール本文の最大文字数 */
         const val MAX_QUESTION_CHARS = 500
@@ -49,7 +49,7 @@ class Pipeline(ctx: Context) {
     /** 検索して、予算内に収めた参考資料テキストと出典名を返す */
     fun retrieve(query: String): Pair<String, List<String>> {
         val hits = try {
-            rag.search(query, TOP_K)
+            rag.searchTwoStage(query, TOP_K)
         } catch (e: Exception) {
             Log.e(TAG, "search failed", e); emptyList()
         }
@@ -60,8 +60,9 @@ class Pipeline(ctx: Context) {
         for (h in hits) {
             if (budget <= 100) break
             val piece = h.text.take(budget)
-            used.add("--- ${h.name} ---\n$piece")
-            if (h.name !in sources) sources.add(h.name)
+            used.add("--- ${if (h.title.isNotEmpty()) h.title else h.name} ---\n$piece")
+            val label = if (h.title.isNotEmpty()) h.title else h.name
+            if (label !in sources) sources.add(label)
             budget -= piece.length
         }
 

@@ -199,14 +199,14 @@ class RagActivity : Activity() {
         results.text = "検索中…"
         thread {
             val t0 = System.currentTimeMillis()
-            val hits = db.search(q, limit = 5)
+            val hits = db.searchTwoStage(q, limit = 5)
             val ms = System.currentTimeMillis() - t0
             ui.post {
                 results.text = if (hits.isEmpty()) "該当なし (${ms}ms)"
                 else buildString {
                     append("${hits.size}件 / ${ms}ms\n\n")
                     for ((i, h) in hits.withIndex()) {
-                        append("[${i + 1}] ${h.name}  score=%.2f\n".format(h.score))
+                        append("[${i + 1}] ${h.name}${if (h.title.isNotEmpty()) " (" + h.title + ")" else ""}  score=%.2f\n".format(h.score))
                         append(h.text.take(300))
                         append("\n\n")
                     }
