@@ -321,6 +321,15 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
             .take(limit)
     }
 
+    /** インデックス済みの item_id 一覧（FolderSync の削除検出に使う） */
+    fun allDocIds(): List<String> {
+        val out = ArrayList<String>()
+        readableDatabase.rawQuery("SELECT item_id FROM docs", null).use {
+            while (it.moveToNext()) out.add(it.getString(0))
+        }
+        return out
+    }
+
     // --------------------------------------------------------------- stats
 
     data class Stats(val docs: Long, val chunks: Long, val terms: Long)
