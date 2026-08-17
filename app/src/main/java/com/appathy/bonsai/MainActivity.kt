@@ -2,6 +2,7 @@ package com.appathy.bonsai
 
 import android.app.Activity
 import android.app.ActivityManager
+import android.app.AlertDialog
 import android.Manifest
 import android.content.pm.PackageManager
 import android.content.Context
@@ -60,6 +61,8 @@ class MainActivity : Activity() {
     private lateinit var editorBtn: Button
     private lateinit var ragToggle: Button
     private var useRag = true
+    private lateinit var tagBtn: Button
+    private var selectedTag: String = ""
     private val pipeline by lazy { Pipeline(applicationContext) }
     private lateinit var serverInfo: TextView
     private lateinit var input: EditText
@@ -87,27 +90,34 @@ class MainActivity : Activity() {
         }
         root.addView(status)
 
-        // v1.7: 5つのボタンを縦積みにしていたため、キーボードを出すと
-        // 入力欄が押し出されて隠れていた。横1列にまとめて高さを詰める。
-        val navRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun nav(label: String, onTap: () -> Unit) = Button(this).apply {
+        // v1.7: ボタンの縦積みでキーボードに入力欄が隠れていたため横並びにした。
+        // v1.8: 「使い方」を足して 3列×2行 にする。
+        fun navRow() = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            root.addView(this, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+        val row1 = navRow()
+        val row2 = navRow()
+        fun nav(row: LinearLayout, label: String, onTap: () -> Unit) = Button(this).apply {
             text = label
             textSize = 11f
             setPadding(2, 0, 2, 0)
             setOnClickListener { onTap() }
-            navRow.addView(this, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            row.addView(this, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         }
 
-        pickBtn = nav("モデル") { pickModel() }
-        serverBtn = nav("サーバー") { toggleServer() }
-        ragBtn = nav("RAG") {
+        pickBtn = nav(row1, "モデル") { pickModel() }
+        serverBtn = nav(row1, "サーバー") { toggleServer() }
+        nav(row1, "使い方") {
+            startActivity(Intent(this@MainActivity, ManualActivity::class.java)) }
+
+        ragBtn = nav(row2, "RAG設定") {
             startActivity(Intent(this@MainActivity, RagActivity::class.java)) }
-        editorBtn = nav("エディタ") {
+        editorBtn = nav(row2, "エディタ") {
             startActivity(Intent(this@MainActivity, EditorActivity::class.java)) }
-        mailBtn = nav("メール") {
+        mailBtn = nav(row2, "メール") {
             startActivity(Intent(this@MainActivity, MailActivity::class.java)) }
 
-        root.addView(navRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         serverInfo = TextView(this).apply {
             setTextColor(Color.parseColor("#63BA80"))
@@ -125,13 +135,24 @@ class MainActivity : Activity() {
         }
         root.addView(input, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
+        val ragRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         ragToggle = Button(this).apply {
+            textSize = 11f
+            setPadding(2, 0, 2, 0)
             setOnClickListener {
                 useRag = !useRag
                 updateRagToggle()
             }
         }
-        root.addView(ragToggle, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        ragRow.addView(ragToggle, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+
+        tagBtn = Button(this).apply {
+            textSize = 11f
+            setPadding(2, 0, 2, 0)
+            setOnClickListener { pickTag() }
+        }
+        ragRow.addView(tagBtn, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        root.addView(ragRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         runBtn = Button(this).apply {
             text = "生成"
@@ -332,12 +353,46 @@ class MainActivity : Activity() {
     }
 
     private fun updateRagToggle() {
-        ragToggle.text = if (useRag) "RAG参照: ON（資料を検索）"
-                         else "RAG参照: OFF（モデル単独）"
+        ragToggle.text = if (useRag) "RAG: ON" else "RAG: OFF"
+        tagBtn.isEnabled = useRag
+        tagBtn.text = when {
+            !useRag -> "（タグ不要）"
+            selectedTag.isEmpty() -> "タグ未選択 ▼"
+            else -> "$selectedTag ▼"
+        }
+    }
+
+    /**
+     * タグ選択。資料が増えると、タグを指定しないと別アプリの資料が混ざるため、
+     * RAG参照 ON のときは必ずタグを選ばせる。
+     */
+    private fun pickTag() {
+        val tags = pipeline.tags()
+        if (tags.isEmpty()) {
+            status.text = "タグがありません。RAG設定でインデックスを作成してください"
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("資料タグを選択")
+            .setItems(tags.toTypedArray()) { _, which ->
+                selectedTag = tags[which]
+                updateRagToggle()
+                status.text = "タグ「$selectedTag」の資料だけを検索します"
+            }
+            .setNegativeButton("キャンセル", null)
+            .show()
     }
 
     private fun generate() {
         val prompt = input.text.toString()
+
+        // RAG参照 ON でタグ未選択なら検索できない（仕様）
+        if (useRag && selectedTag.isEmpty()) {
+            status.text = "タグを選択してください（右のボタン）"
+            pickTag()
+            return
+        }
+
         generating = true
         runBtn.text = "停止"
         pickBtn.isEnabled = false
@@ -371,7 +426,8 @@ class MainActivity : Activity() {
                             "【参考資料】\n" + context + "\n\n【質問】\n" + prompt +
                             "\n\n参考資料に基づいて回答してください。"
                         },
-                        onToken = { push(it) }
+                        onToken = { push(it) },
+                        tag = selectedTag
                     )
                     sources = out.sources
                 } else {

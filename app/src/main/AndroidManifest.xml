@@ -27,6 +27,12 @@
         </activity>
 
         <activity
+            android:name=".ManualActivity"
+            android:exported="false"
+            android:label="使い方"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <activity
             android:name=".RagActivity"
             android:exported="false"
             android:label="RAG設定"

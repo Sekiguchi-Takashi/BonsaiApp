@@ -46,10 +46,16 @@ class Pipeline(ctx: Context) {
 
     data class Outcome(val answer: String, val sources: List<String>, val ms: Long)
 
-    /** 検索して、予算内に収めた参考資料テキストと出典名を返す */
-    fun retrieve(query: String): Pair<String, List<String>> {
+    /** インデックス済みのタグ一覧（トップ画面のタグ選択に出す） */
+    fun tags(): List<String> = try { rag.listTitles() } catch (e: Exception) { emptyList() }
+
+    /**
+     * 検索して、予算内に収めた参考資料テキストと出典名を返す
+     * @param tag 空でなければ、そのタグ（app_name）の資料だけを検索対象にする
+     */
+    fun retrieve(query: String, tag: String = ""): Pair<String, List<String>> {
         val hits = try {
-            rag.searchTwoStage(query, TOP_K)
+            rag.searchTwoStage(query, TOP_K, titleFilter = tag)
         } catch (e: Exception) {
             Log.e(TAG, "search failed", e); emptyList()
         }
@@ -82,10 +88,11 @@ class Pipeline(ctx: Context) {
     fun answer(
         searchQuery: String,
         userBlock: (context: String) -> String,
-        onToken: ((String) -> Unit)? = null
+        onToken: ((String) -> Unit)? = null,
+        tag: String = ""
     ): Outcome {
         val t0 = System.currentTimeMillis()
-        val (context, sources) = retrieve(searchQuery)
+        val (context, sources) = retrieve(searchQuery, tag)
 
         val sb = StringBuilder()
         Engine.generate(

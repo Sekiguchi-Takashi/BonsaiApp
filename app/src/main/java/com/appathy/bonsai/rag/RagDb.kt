@@ -218,7 +218,7 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
      *        その種別の資料だけを検索対象にする（将来のキャラ絞り込み用）。
      */
     fun search(query: String, limit: Int = 4, typeFilter: String = ""): List<Hit> {
-        return searchInternal(query, limit, typeFilter, null)
+        return searchInternal(query, limit, typeFilter, null, "")
     }
 
     /**
@@ -236,11 +236,12 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
         query: String,
         limit: Int = 4,
         typeFilter: String = "",
-        docNarrow: Int = 3
+        docNarrow: Int = 3,
+        titleFilter: String = ""
     ): List<Hit> {
         // 第1段: 文書単位のスコアで候補を絞る
         val docScores = HashMap<Long, Double>()
-        for (h in searchInternal(query, 60, typeFilter, null)) {
+        for (h in searchInternal(query, 60, typeFilter, null, titleFilter)) {
             docScores[h.docId] = (docScores[h.docId] ?: 0.0) + h.score
         }
         if (docScores.isEmpty()) return emptyList()
@@ -252,7 +253,7 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
             .toSet()
 
         // 第2段: 絞った文書の中だけでチャンクを選ぶ
-        return searchInternal(query, limit, typeFilter, topDocs)
+        return searchInternal(query, limit, typeFilter, topDocs, titleFilter)
     }
 
     /**
@@ -263,7 +264,8 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
         query: String,
         limit: Int,
         typeFilter: String,
-        docFilter: Set<Long>?
+        docFilter: Set<Long>?,
+        titleFilter: String
     ): List<Hit> {
         val db = readableDatabase
 
@@ -312,16 +314,32 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
                     if (it.moveToFirst()) {
                         val dtype = it.getString(3)
                         val docId = it.getLong(4)
+                        val dtitle = it.getString(5)
                         when {
                             typeFilter.isNotEmpty() && dtype != typeFilter -> null
+                            titleFilter.isNotEmpty() && dtitle != titleFilter -> null
                             docFilter != null && docId !in docFilter -> null
                             else -> Hit(cid, score, it.getString(0), it.getString(1),
-                                        it.getString(2), dtype, docId, it.getString(5))
+                                        it.getString(2), dtype, docId, dtitle)
                         }
                     } else null
                 }
             }
             .take(limit)
+    }
+
+    /**
+     * 資料に付いているタグ（frontmatter の app_name / character_name）の一覧。
+     * トップ画面のタグ選択に出す。
+     */
+    fun listTitles(): List<String> {
+        val out = ArrayList<String>()
+        readableDatabase.rawQuery(
+            "SELECT DISTINCT title FROM docs WHERE title IS NOT NULL AND title <> '' " +
+            "ORDER BY title", null).use {
+            while (it.moveToNext()) out.add(it.getString(0))
+        }
+        return out
     }
 
     /** インデックス済みの item_id 一覧（FolderSync の削除検出に使う） */
