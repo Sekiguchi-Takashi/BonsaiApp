@@ -269,25 +269,53 @@ class MainActivity : Activity() {
 
         thread {
             val t0 = System.currentTimeMillis()
-            val ok = try {
-                val path = modelStore.openPath(entry)
-                llama.load(path, nCtx = N_CTX, nThreads = threadCount())
+            var how = "直接読み"
+            var err: String? = null
+
+            // 1) まずコピーせずに直接読む
+            var ok = try {
+                llama.load(modelStore.openPath(entry), nCtx = N_CTX, nThreads = threadCount())
             } catch (e: Exception) {
-                android.util.Log.e("MainActivity", "load failed", e)
+                err = e.message
+                android.util.Log.e("MainActivity", "direct load failed", e)
                 false
             }
+
+            // 2) 失敗したらアプリ内部にキャッシュしてから読む。
+            //    スコープドストレージ配下では /proc/self/fd/N を llama.cpp が
+            //    開き直せないため、この経路が必要になる端末がある。
+            if (!ok) {
+                modelStore.release()
+                how = "キャッシュ"
+                ui.post { status.text = "直接読み込めないためコピー中…" }
+                ok = try {
+                    val path = modelStore.cachePath(entry) { done ->
+                        val mb = done / 1024 / 1024
+                        ui.post { status.text = "コピー中… ${mb}MB / ${entry.size / 1024 / 1024}MB" }
+                    }
+                    ui.post { status.text = "読込中…（キャッシュ）" }
+                    llama.load(path, nCtx = N_CTX, nThreads = threadCount())
+                } catch (e: Exception) {
+                    err = e.message
+                    android.util.Log.e("MainActivity", "cache load failed", e)
+                    false
+                }
+            }
+
             val ms = System.currentTimeMillis() - t0
             ui.post {
                 if (ok) {
-                    status.text = "読込完了 ${ms}ms / ${entry.name} / " +
+                    status.text = "読込完了 ${ms}ms / ${entry.name}（$how） / " +
                             "threads=${threadCount()} / 空きRAM ${freeRamMb()}MB"
                 } else {
                     modelStore.release()
                     status.text = "読込失敗: ${entry.name}"
                     alert("モデルを読み込めませんでした",
-                        "ファイル: ${entry.name}\n\n" +
+                        "ファイル: ${entry.name}\n" +
+                        (if (err != null) "原因: $err\n" else "") + "\n" +
                         "・ファイルが壊れていないか\n" +
                         "・空きRAMが足りているか（現在 ${freeRamMb()}MB）\n" +
+                        "・空き容量が足りているか\n" +
                         "を確認してください。")
                 }
                 runBtn.isEnabled = ok

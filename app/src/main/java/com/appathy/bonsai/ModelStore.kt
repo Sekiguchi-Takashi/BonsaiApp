@@ -6,6 +6,8 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.util.Log
+import java.io.File
+import java.io.FileOutputStream
 
 /**
  * モデル専用フォルダの管理（v1.9）。
@@ -96,8 +98,10 @@ class ModelStore(private val ctx: Context) {
     // ------------------------------------------------------------- 展開
 
     /**
-     * llama.cpp に渡せるパスを作る。コピーはしない。
-     * 返したパスは [release] を呼ぶまで有効。
+     * llama.cpp に渡せるパスを作る（直接読み）。
+     *
+     * 返したパスは [release] を呼ぶまで有効。ただしスコープドストレージ配下では
+     * llama.cpp がこのパスを開き直せず失敗することがある（後述の [cachePath]）。
      */
     fun openPath(entry: Entry): String {
         val tree = treeUri ?: throw IllegalStateException("フォルダ未選択")
@@ -108,6 +112,75 @@ class ModelStore(private val ctx: Context) {
         pfd = d
         fileName = entry.name
         return "/proc/self/fd/${d.fd}"
+    }
+
+    /**
+     * 直接読みが失敗したときのフォールバック。
+     *
+     * `/proc/self/fd/N` は実ファイルへのシンボリックリンクなので、llama.cpp が
+     * 開き直すと `/storage/emulated/0/...` を直接開こうとし、
+     * スコープドストレージの制限で拒否される。SAF の記述子は
+     * 「その fd 経由でのみ」有効なため、この経路は端末によって通らない。
+     *
+     * そこでアプリ内部にキャッシュを作る。ファイル名とサイズが一致する
+     * キャッシュがあれば再利用するので、コピーは初回だけで済む。
+     * 元ファイルはフォルダに残るため、キャッシュが消えても再取得は不要。
+     */
+    fun cachePath(entry: Entry, onProgress: (Long) -> Unit): String {
+        val tree = treeUri ?: throw IllegalStateException("フォルダ未選択")
+        val cache = File(ctx.filesDir, "model_cache.gguf")
+        val stamp = File(ctx.filesDir, "model_cache.txt")
+        val want = "${entry.name}:${entry.size}"
+
+        if (cache.exists() && stamp.exists() && stamp.readText().trim() == want) {
+            Log.i(TAG, "cache hit: ${entry.name}")
+            return cache.absolutePath
+        }
+
+        // 空き容量の確認（キャッシュを作り直すぶんを含む）
+        val need = entry.size + 64L * 1024 * 1024
+        val free = ctx.filesDir.usableSpace + (if (cache.exists()) cache.length() else 0L)
+        if (entry.size > 0 && free < need) {
+            throw IllegalStateException(
+                "空き容量が足りません（必要 ${need / 1024 / 1024}MB / " +
+                "空き ${free / 1024 / 1024}MB）")
+        }
+
+        release()
+        if (cache.exists()) cache.delete()
+        if (stamp.exists()) stamp.delete()
+
+        val uri = DocumentsContract.buildDocumentUriUsingTree(tree, entry.docId)
+        val tmp = File(ctx.filesDir, "model_cache.tmp")
+        cr.openInputStream(uri)!!.use { ins ->
+            FileOutputStream(tmp).use { out ->
+                val buf = ByteArray(1 shl 20)
+                var total = 0L
+                var last = 0L
+                while (true) {
+                    val n = ins.read(buf)
+                    if (n < 0) break
+                    out.write(buf, 0, n)
+                    total += n
+                    if (total - last >= 16L * 1024 * 1024) {
+                        last = total
+                        onProgress(total)
+                    }
+                }
+            }
+        }
+        if (!tmp.renameTo(cache)) throw IllegalStateException("キャッシュの作成に失敗しました")
+        stamp.writeText(want)
+        fileName = entry.name
+        Log.i(TAG, "cached: ${entry.name} (${cache.length()} bytes)")
+        return cache.absolutePath
+    }
+
+    /** キャッシュを削除する（容量を空けたいとき） */
+    fun clearCache() {
+        File(ctx.filesDir, "model_cache.gguf").delete()
+        File(ctx.filesDir, "model_cache.txt").delete()
+        File(ctx.filesDir, "model_cache.tmp").delete()
     }
 
     /** 記述子を閉じる。モデルを解放したあとに呼ぶこと */

@@ -274,10 +274,20 @@ class ServerService : Service() {
         }
         thread(name = "model-load") {
             val threads = (Runtime.getRuntime().availableProcessors() - 2).coerceIn(2, 6)
-            val ok = try {
+            // Activity と同じく、直接読み → 失敗したらキャッシュの順で試す
+            var ok = try {
                 Engine.bridge.load(store.openPath(entry), nCtx = 2048, nThreads = threads)
             } catch (e: Exception) {
-                Log.e(TAG, "load failed", e); false
+                Log.e(TAG, "direct load failed", e); false
+            }
+            if (!ok) {
+                store.release()
+                ok = try {
+                    Engine.bridge.load(store.cachePath(entry) { },
+                        nCtx = 2048, nThreads = threads)
+                } catch (e: Exception) {
+                    Log.e(TAG, "cache load failed", e); false
+                }
             }
             if (!ok) store.release()
             Log.i(TAG, "model load from service: $ok (${entry.name})")
