@@ -106,7 +106,10 @@ class RagDb(ctx: Context) : SQLiteOpenHelper(ctx, "rag.db", null, 2) {
             // 絞り込めなかった。全チャンクの先頭に主題名を付与する。
             val subject = meta["app_name"] ?: meta["character_name"] ?: ""
             val label = meta["app_label"] ?: meta["story"] ?: ""
-            val tag = listOf(subject, label).filter { it.isNotEmpty() }
+            // doc_part（機能 / 実務 など）も含める。1アプリを複数ファイルに
+            // 分割した場合、「MemoApp の実務」で絞り込めるようにするため。
+            val part = meta["doc_part"] ?: ""
+            val tag = listOf(subject, label, part).filter { it.isNotEmpty() }
                 .distinct().joinToString(" ")
 
             val chunks = chunk(bodyText).map {

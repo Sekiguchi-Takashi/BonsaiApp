@@ -87,36 +87,27 @@ class MainActivity : Activity() {
         }
         root.addView(status)
 
-        pickBtn = Button(this).apply {
-            text = "モデルを選択 (.gguf)"
-            setOnClickListener { pickModel() }
+        // v1.7: 5つのボタンを縦積みにしていたため、キーボードを出すと
+        // 入力欄が押し出されて隠れていた。横1列にまとめて高さを詰める。
+        val navRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun nav(label: String, onTap: () -> Unit) = Button(this).apply {
+            text = label
+            textSize = 11f
+            setPadding(2, 0, 2, 0)
+            setOnClickListener { onTap() }
+            navRow.addView(this, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         }
-        root.addView(pickBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        serverBtn = Button(this).apply {
-            text = "サーバー起動"
-            isEnabled = false
-            setOnClickListener { toggleServer() }
-        }
-        root.addView(serverBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        pickBtn = nav("モデル") { pickModel() }
+        serverBtn = nav("サーバー") { toggleServer() }
+        ragBtn = nav("RAG") {
+            startActivity(Intent(this@MainActivity, RagActivity::class.java)) }
+        editorBtn = nav("エディタ") {
+            startActivity(Intent(this@MainActivity, EditorActivity::class.java)) }
+        mailBtn = nav("メール") {
+            startActivity(Intent(this@MainActivity, MailActivity::class.java)) }
 
-        ragBtn = Button(this).apply {
-            text = "RAG設定 (資料フォルダ)"
-            setOnClickListener { startActivity(Intent(this@MainActivity, RagActivity::class.java)) }
-        }
-        root.addView(ragBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-
-        editorBtn = Button(this).apply {
-            text = "資料エディタ"
-            setOnClickListener { startActivity(Intent(this@MainActivity, EditorActivity::class.java)) }
-        }
-        root.addView(editorBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-
-        mailBtn = Button(this).apply {
-            text = "メール連携 (Gmail)"
-            setOnClickListener { startActivity(Intent(this@MainActivity, MailActivity::class.java)) }
-        }
-        root.addView(mailBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        root.addView(navRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         serverInfo = TextView(this).apply {
             setTextColor(Color.parseColor("#63BA80"))
@@ -258,10 +249,10 @@ class MainActivity : Activity() {
         val f = modelFile()
         if (!f.exists()) {
             status.text = "モデル未取込。上のボタンから .gguf を選択してください"
-            pickBtn.text = "モデルを選択 (.gguf)"
+            pickBtn.text = "モデル"
             return
         }
-        pickBtn.text = "モデルを再選択"
+        pickBtn.text = "モデル変更"
         val sizeMb = f.length() / 1024 / 1024
         status.text = "読込中… ${sizeMb}MB / 空きRAM ${freeRamMb()}MB"
 
@@ -300,7 +291,7 @@ class MainActivity : Activity() {
 
     private fun refreshServerInfo() {
         val on = ServerService.serverWanted(this)
-        serverBtn.text = if (on) "サーバー停止" else "サーバー起動"
+        serverBtn.text = if (on) "停止" else "サーバー"
         serverInfo.text = if (on)
             "http://127.0.0.1:$SERVER_PORT/v1\nOpenAI互換 / api_key は任意の文字列で可"
         else ""
@@ -341,8 +332,8 @@ class MainActivity : Activity() {
     }
 
     private fun updateRagToggle() {
-        ragToggle.text = if (useRag) "RAG参照: ON（資料を検索して答える）"
-                         else "RAG参照: OFF（モデル単独で答える）"
+        ragToggle.text = if (useRag) "RAG参照: ON（資料を検索）"
+                         else "RAG参照: OFF（モデル単独）"
     }
 
     private fun generate() {
