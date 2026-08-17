@@ -8,18 +8,14 @@ import android.content.pm.PackageManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.OpenableColumns
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.*
-import java.io.File
-import java.io.FileOutputStream
 import com.appathy.bonsai.mail.Pipeline
 import kotlin.concurrent.thread
 
@@ -37,7 +33,7 @@ class MainActivity : Activity() {
         /** サービスがモデル解放の可否を判断するために参照する */
         @Volatile var isForeground = false
 
-        private const val REQ_PICK = 1001
+        private const val REQ_MODEL_TREE = 1002
         private const val N_CTX = 2048   // RAG の文脈を積むため v0.7 で 2048 に戻した
         private const val MAX_TOKENS = 512
         private const val SYSTEM_PROMPT =
@@ -71,7 +67,6 @@ class MainActivity : Activity() {
 
     @Volatile private var generating = false
 
-    private fun modelFile() = File(filesDir, "model.gguf")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -106,7 +101,7 @@ class MainActivity : Activity() {
             row.addView(this, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         }
 
-        pickBtn = nav(row1, "モデル") { pickModel() }
+        pickBtn = nav(row1, "モデル") { chooseModel() }
         serverBtn = nav(row1, "サーバー") { toggleServer() }
         nav(row1, "使い方") {
             startActivity(Intent(this@MainActivity, ManualActivity::class.java)) }
@@ -188,145 +183,118 @@ class MainActivity : Activity() {
 
     // ---------- モデル取込（SAF） ----------
 
-    private fun pickModel() {
-        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
+    private val modelStore by lazy { ModelStore(this) }
+
+    // ---------- モデルフォルダ（v1.9: コピーせず直接読む） ----------
+
+    private fun pickModelFolder() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                     Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }
-        startActivityForResult(Intent.createChooser(i, "model.gguf を選択"), REQ_PICK)
+        startActivityForResult(i, REQ_MODEL_TREE)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQ_PICK || resultCode != RESULT_OK) return
-        data?.data?.let { importModel(it) }
+        if (requestCode != REQ_MODEL_TREE || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        try {
+            modelStore.persist(uri)
+            loadModel()
+        } catch (e: Exception) {
+            alert("フォルダの設定に失敗しました", e.message ?: "")
+        }
     }
 
-    private fun importModel(uri: Uri) {
-        pickBtn.isEnabled = false
-        runBtn.isEnabled = false
-
-        // v1.4: コピー前に空き容量を確認する。従来はコピー途中で
-        // 容量切れになり、進捗表示のまま失敗していた。
-        val size = try {
-            contentResolver.query(uri, null, null, null, null)?.use { c ->
-                val i = c.getColumnIndex(OpenableColumns.SIZE)
-                if (i >= 0 && c.moveToFirst()) c.getLong(i) else -1L
-            } ?: -1L
-        } catch (e: Exception) { -1L }
-
-        if (size > 0 && filesDir.usableSpace < size + 64L * 1024 * 1024) {
-            status.text = "空き容量不足: %d MB 必要（現在の空き %d MB）"
-                .format(size / 1024 / 1024 + 64, filesDir.usableSpace / 1024 / 1024)
-            pickBtn.isEnabled = true
-            runBtn.isEnabled = llama.isLoaded
-            return
-        }
-
-        llama.free()
-
-        thread {
-            val tmp = File(filesDir, "model.gguf.tmp")
-            try {
-                contentResolver.openInputStream(uri)!!.use { ins ->
-                    FileOutputStream(tmp).use { out ->
-                        val buf = ByteArray(1 shl 20)
-                        var total = 0L
-                        var lastPost = 0L
-                        while (true) {
-                            val n = ins.read(buf)
-                            if (n < 0) break
-                            out.write(buf, 0, n)
-                            total += n
-                            if (total - lastPost >= 8L * 1024 * 1024) {
-                                lastPost = total
-                                val mb = total / 1024 / 1024
-                                ui.post { status.text = "コピー中… ${mb} MB" }
-                            }
-                        }
+    /** モデルボタン。複数あれば選択、1つなら即読込、無ければエラー表示 */
+    private fun chooseModel() {
+        if (!modelStore.isConfigured) { pickModelFolder(); return }
+        val list = modelStore.listModels()
+        when {
+            list.isEmpty() -> noModelDialog()
+            list.size == 1 -> loadModel()
+            else -> {
+                val labels = list.map { "${it.name}  (${it.size / 1024 / 1024}MB)" }
+                AlertDialog.Builder(this)
+                    .setTitle("モデルを選択")
+                    .setItems(labels.toTypedArray()) { _, w ->
+                        modelStore.fileName = list[w].name
+                        loadModel()
                     }
-                }
-                val dst = modelFile()
-                if (dst.exists()) dst.delete()
-                if (!tmp.renameTo(dst)) throw IllegalStateException("rename failed")
-
-                ui.post {
-                    pickBtn.isEnabled = true
-                    loadModel()
-                }
-            } catch (e: Exception) {
-                tmp.delete()
-                ui.post {
-                    status.text = "取込失敗: ${e.message}"
-                    pickBtn.isEnabled = true
-                }
+                    .setNeutralButton("フォルダを変更") { _, _ -> pickModelFolder() }
+                    .setNegativeButton("キャンセル", null)
+                    .show()
             }
         }
+    }
+
+    private fun alert(title: String, msg: String) {
+        AlertDialog.Builder(this)
+            .setTitle(title).setMessage(msg)
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    /** 起動時にモデルが見つからないときのポップアップ */
+    private fun noModelDialog() {
+        val where = if (modelStore.isConfigured)
+            "フォルダ「${modelStore.folderLabel()}」に .gguf がありません。"
+        else
+            "モデルフォルダが未設定です。"
+        AlertDialog.Builder(this)
+            .setTitle("モデルが見つかりません")
+            .setMessage(where + "\n\n.gguf を置いたフォルダを選んでください。" +
+                        "\nファイルはコピーされず、その場所のまま読み込まれます。")
+            .setPositiveButton("フォルダを選ぶ") { _, _ -> pickModelFolder() }
+            .setNegativeButton("あとで", null)
+            .setCancelable(false)
+            .show()
     }
 
     // ---------- モデル読込 ----------
 
     private fun loadModel() {
-        val f = modelFile()
-        if (!f.exists()) {
-            status.text = "モデル未取込。上のボタンから .gguf を選択してください"
+        val entry = if (modelStore.isConfigured) modelStore.preferred() else null
+        if (entry == null) {
+            status.text = "モデル未設定"
             pickBtn.text = "モデル"
+            runBtn.isEnabled = false
+            noModelDialog()
             return
         }
+
         pickBtn.text = "モデル変更"
-        val sizeMb = f.length() / 1024 / 1024
-        status.text = "読込中… ${sizeMb}MB / 空きRAM ${freeRamMb()}MB"
+        status.text = "読込中… ${entry.name} (${entry.size / 1024 / 1024}MB)"
 
         thread {
             val t0 = System.currentTimeMillis()
-            val ok = llama.load(f.absolutePath, nCtx = N_CTX, nThreads = threadCount())
+            val ok = try {
+                val path = modelStore.openPath(entry)
+                llama.load(path, nCtx = N_CTX, nThreads = threadCount())
+            } catch (e: Exception) {
+                android.util.Log.e("MainActivity", "load failed", e)
+                false
+            }
             val ms = System.currentTimeMillis() - t0
             ui.post {
-                status.text = if (ok)
-                    "読込完了 ${ms}ms / threads=${threadCount()} / 空きRAM ${freeRamMb()}MB"
-                else
-                    "読込失敗。RAM不足の可能性（空き ${freeRamMb()}MB）"
+                if (ok) {
+                    status.text = "読込完了 ${ms}ms / ${entry.name} / " +
+                            "threads=${threadCount()} / 空きRAM ${freeRamMb()}MB"
+                } else {
+                    modelStore.release()
+                    status.text = "読込失敗: ${entry.name}"
+                    alert("モデルを読み込めませんでした",
+                        "ファイル: ${entry.name}\n\n" +
+                        "・ファイルが壊れていないか\n" +
+                        "・空きRAMが足りているか（現在 ${freeRamMb()}MB）\n" +
+                        "を確認してください。")
+                }
                 runBtn.isEnabled = ok
                 serverBtn.isEnabled = ok
                 refreshServerInfo()
             }
         }
-    }
-
-    // ---------- OpenAI互換サーバー ----------
-
-    private fun toggleServer() {
-        if (ServerService.serverWanted(this)) {
-            ServerService.stopServer(this)
-        } else {
-            if (Build.VERSION.SDK_INT >= 33 &&
-                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                    != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2001)
-            }
-            ServerService.startServer(this, SERVER_PORT, BIND_ALL)
-        }
-        // サービス起動は非同期なので少し待ってから反映
-        ui.postDelayed({ refreshServerInfo() }, 400)
-    }
-
-    private fun refreshServerInfo() {
-        val on = ServerService.serverWanted(this)
-        serverBtn.text = if (on) "停止" else "サーバー"
-        serverInfo.text = if (on)
-            "http://127.0.0.1:$SERVER_PORT/v1\nOpenAI互換 / api_key は任意の文字列で可"
-        else ""
-    }
-
-    override fun onResume() {
-        super.onResume()
-        isForeground = true
-        if (::serverBtn.isInitialized) refreshServerInfo()
-    }
-
-    override fun onPause() {
-        isForeground = false
-        super.onPause()
     }
 
     private fun threadCount() =
@@ -466,7 +434,10 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         llama.stop()
         // サーバー稼働中は他アプリが使うのでモデルを解放しない
-        if (!ServerService.serverWanted(this) && !ServerService.mailWanted(this)) llama.free()
+        if (!ServerService.serverWanted(this) && !ServerService.mailWanted(this)) {
+            llama.free()
+            modelStore.release()   // モデル解放後でないと記述子が無効になる
+        }
         super.onDestroy()
     }
 }

@@ -13,7 +13,6 @@ import android.util.Log
 import com.appathy.bonsai.mail.MailQueue
 import com.appathy.bonsai.mail.MailWatcher
 import com.appathy.bonsai.mail.Pipeline
-import java.io.File
 import kotlin.concurrent.thread
 
 /**
@@ -265,15 +264,23 @@ class ServerService : Service() {
      */
     private fun ensureModelLoaded() {
         if (Engine.isLoaded) return
-        val f = File(filesDir, "model.gguf")
-        if (!f.exists()) {
-            Log.w(TAG, "model file not found; server will report no_model")
+        // v1.9: モデルはコピーせず、選択済みフォルダから直接読む。
+        // Activity を経由せず再生成された場合もここで自力で読み込む。
+        val store = ModelStore(applicationContext)
+        val entry = store.preferred()
+        if (entry == null) {
+            Log.w(TAG, "model not found in folder; server will report no_model")
             return
         }
         thread(name = "model-load") {
             val threads = (Runtime.getRuntime().availableProcessors() - 2).coerceIn(2, 6)
-            val ok = Engine.bridge.load(f.absolutePath, nCtx = 2048, nThreads = threads)
-            Log.i(TAG, "model load from service: $ok")
+            val ok = try {
+                Engine.bridge.load(store.openPath(entry), nCtx = 2048, nThreads = threads)
+            } catch (e: Exception) {
+                Log.e(TAG, "load failed", e); false
+            }
+            if (!ok) store.release()
+            Log.i(TAG, "model load from service: $ok (${entry.name})")
             updateNotification()
         }
     }
