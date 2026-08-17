@@ -297,6 +297,42 @@ class MainActivity : Activity() {
         }
     }
 
+    // ---------- OpenAI互換サーバー ----------
+
+    private fun toggleServer() {
+        if (ServerService.serverWanted(this)) {
+            ServerService.stopServer(this)
+        } else {
+            if (Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2001)
+            }
+            ServerService.startServer(this, SERVER_PORT, BIND_ALL)
+        }
+        // サービス起動は非同期なので少し待ってから反映
+        ui.postDelayed({ refreshServerInfo() }, 400)
+    }
+
+    private fun refreshServerInfo() {
+        val on = ServerService.serverWanted(this)
+        serverBtn.text = if (on) "停止" else "サーバー"
+        serverInfo.text = if (on)
+            "http://127.0.0.1:$SERVER_PORT/v1\nOpenAI互換 / api_key は任意の文字列で可"
+        else ""
+    }
+
+    override fun onResume() {
+        super.onResume()
+        isForeground = true
+        if (::serverBtn.isInitialized) refreshServerInfo()
+    }
+
+    override fun onPause() {
+        isForeground = false
+        super.onPause()
+    }
+
     private fun threadCount() =
         (Runtime.getRuntime().availableProcessors() - 2).coerceIn(2, 6)
 
